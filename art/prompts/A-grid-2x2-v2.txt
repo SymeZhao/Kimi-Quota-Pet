@@ -1,0 +1,43 @@
+Character reference: the attached Kimi illustrations (silver-white long wavy hair, violet eyes,
+navy-blue x white frilly maid-style dress with star/moon/music-note motifs, a "K" round emblem
+on the chest bow with a small rainbow ribbon, silver crescent-moon + music-note hair ornament,
+navy hair bow with a hanging "K" charm).
+Format reference: the attached desktop-pet sprite sheet (half-body framing, both hands holding
+a blank dark tablet in front of the chest).
+
+TASK: draw a 2x2 grid of FOUR EXPRESSION PANELS of this same character — one character per cell,
+four equal square cells, thin clean white gutters between them, nothing crossing the gutters.
+
+ABSOLUTE CONSTRAINTS (identical in all four panels):
+- same half-body framing (top of head to mid-thigh), same camera, same zoom, same 3/4 angle
+- identical body, identical hands, identical hair, identical tablet in every panel
+- both hands hold ONE plain BLANK dark tablet in front of the chest, screen facing the viewer,
+  tilted at most 10 degrees, tablet about half the cell width, fully inside the cell, screen empty
+- soft key light from the upper left, same cel-shading, same line weight
+- pure flat white #FFFFFF background in every cell, nothing else — no shadow, no floor, no glow,
+  no moon, no music notes, no sheet music, no gradient, no frame, no text, no watermark
+- absolutely nothing may be cropped by the cell edges
+
+THE ONLY DIFFERENCES between the four panels are the FACES (and at most one tiny accent mark):
+
+  top-left      calm confident smile, eyes open, relaxed brows, slight blush      (idle / default)
+
+  top-right     being charged — IMPORTANT: this is a WINCING face, NOT a wink and NOT a smirk.
+                BOTH eyes are squeezed completely shut: draw both eyes as two closed curved
+                lines (upward-curving "><" arcs) with no visible iris at all. Heavy blush on
+                BOTH cheeks, one small sweat drop near the right temple, mouth a small frown.
+
+  bottom-left   worried: brows raised and tilted inward, eyes wide open with a small
+                tear at the outer corner, mouth slightly trembling    (quota running out)
+
+  bottom-right  flat deadpan stare, half-lidded eyes, straight mouth,
+                no blush, no other marks                                (offline / no reading)
+
+Body pose, hands, tablet, hair and lighting must be pixel-identical across the four panels.
+Treat the body as ONE drawing copied four times; change ONLY the facial features.
+
+Keep the character design EXACTLY as in the reference: the same face shape and eye shape,
+the same violet iris colour, the same silver-white hair with the same parting and the same
+crescent-moon + music-note hair ornament on her left side, the same "K" chest emblem with the
+rainbow ribbon, the same navy x white outfit with star/moon/music-note embroidery.
+Do not restyle, do not change her age, do not add or remove accessories.

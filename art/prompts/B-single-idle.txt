@@ -1,0 +1,21 @@
+Character reference: the attached Kimi illustrations (silver-white long wavy hair, violet eyes,
+navy-blue x white frilly maid-style dress with star/moon/music-note motifs, a "K" round emblem
+on the chest bow with a small rainbow ribbon, silver crescent-moon + music-note hair ornament).
+Format reference: the attached desktop-pet sprite sheet.
+
+Draw ONE half-body portrait of this character: top of head to mid-thigh, centered, filling ~92%
+of the height of a square 1:1 canvas, upper body facing the viewer at a slight 3/4 angle, both
+hands holding one plain BLANK dark tablet (near-black, thin lighter bezel, rounded corners) in
+front of the chest, screen facing the viewer, tilted at most 10 degrees, screen completely empty.
+
+Expression: calm confident smile, eyes open, relaxed brows, slight blush
+
+Background: pure flat #FFFFFF white, nothing else — no shadow, no floor, no glow, no moon,
+no music notes, no gradient, no frame, no text, no watermark. Nothing cropped by the edges.
+Style: clean anime illustration, crisp line art, soft cel shading, soft key light from upper left.
+
+Keep the character design EXACTLY as in the reference: the same face shape and eye shape,
+the same violet iris colour, the same silver-white hair with the same parting and the same
+crescent-moon + music-note hair ornament on her left side, the same "K" chest emblem with the
+rainbow ribbon, the same navy x white outfit with star/moon/music-note embroidery.
+Do not restyle, do not change her age, do not add or remove accessories.

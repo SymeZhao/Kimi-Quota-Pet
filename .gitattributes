@@ -1,0 +1,19 @@
+# Keep line endings predictable for a Windows-only project, and make sure the
+# assets are never touched by text conversion.
+* text=auto
+
+*.ps1   text
+*.vbs   text
+*.cmd   text
+*.md    text
+*.txt   text
+*.py    text
+*.json  text
+
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.webp  binary
+*.ico   binary
+*.mp3   binary
+*.zip   binary

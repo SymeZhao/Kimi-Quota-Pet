@@ -1,0 +1,16 @@
+This is ONE expression panel cropped out of a 2x2 desktop-pet sprite sheet. It is an EDIT
+TARGET. Keep the framing, the crop, the pose, both hands, the dark tablet, every hair strand,
+the dress and the pure white background exactly as they are. Do not re-frame, do not zoom,
+do not extend the hair, do not re-crop, do not move or resize anything.
+
+Change ONLY the face of this one panel:
+- BOTH eyes squeezed completely shut, drawn as two closed upward-curving arcs (a "> <" wince).
+  No visible iris at all, no wink, no open eye, no sideways smug glance.
+- Keep the blush on both cheeks exactly as it is.
+- Keep the small frowning mouth exactly as it is.
+- Add ONE small light-blue sweat drop with a tiny white highlight near her right temple
+  (the image-left side of this panel), at about eyebrow height.
+
+Nothing else in the panel may change: not the hair, not the hair ornament, not the bow, not the
+hands, not the tablet, not the clothing, not the lighting, not the background.
+No text, no watermark, no extra props.

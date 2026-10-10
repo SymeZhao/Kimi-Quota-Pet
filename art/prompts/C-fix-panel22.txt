@@ -1,0 +1,22 @@
+This is a 2x2 desktop-pet sprite sheet of the same character with four expression panels.
+Treat it as an EDIT TARGET: keep the whole sheet exactly as it is, and change ONLY the face
+in the TOP-RIGHT panel (second panel: top row, right column).
+
+In the TOP-RIGHT panel, change the face so that:
+- BOTH eyes are squeezed completely shut as two closed, upward-curving arcs (a wince).
+  No visible iris, no wink, no open eye, no smug or sideways glance.
+- ONE small light-blue sweat drop sits near her right temple (the image-left side of that panel).
+- Keep her existing blush on both cheeks, and keep the small frowning mouth.
+
+Everything else in the top-right panel must stay identical: head tilt, every hair strand,
+the crescent-moon + music-note hair ornament, the "K" bow, both hands, the plain dark tablet,
+the navy x white dress, the framing, and the pure white background.
+
+The OTHER THREE panels (top-left, bottom-left, bottom-right) must remain completely unchanged,
+including their faces.
+
+Also unchanged: the white gutters between the cells, the 2x2 layout, the square canvas,
+the pure flat white background, the line weight and the lighting.
+
+Do not re-frame, do not zoom, do not crop, do not move or resize anything, do not add or remove
+props, no text, no watermark.

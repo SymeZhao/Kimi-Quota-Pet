@@ -1,0 +1,32 @@
+# ---- runtime state and logs (personal, regenerated at run time) ----
+kimi_pet.log
+kimi_quota.log
+state.ini
+kimi_quota_sample.json
+apikey.txt
+
+# ---- diagnostic output from the pet's own flags ----
+_shot*.png
+shot.png
+selftest.png
+_panel_sheet.png
+error.log
+
+# ---- raw image-generation output (large; the sheet actually used is art/kimi-grid.webp) ----
+art/generated/**
+
+# ---- intermediates of the sprite pipeline (regenerate with tools/) ----
+art/newart_*.png
+art/kimi-pet.png
+art/kimi-pet-cutout.png
+art/preview/v*.png
+art/preview/compare*.png
+art/preview/render_widget*.png
+art/preview/cutout_*.png
+art/preview/sample_points.png
+art/preview/tray_icon_256.png
+
+# ---- generic ----
+Thumbs.db
+desktop.ini
+*.tmp

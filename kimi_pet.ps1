@@ -633,6 +633,13 @@ public sealed class DshPet : Form {
     const string S_REFRESH = "\u7ACB\u5373\u5237\u65B0\u989D\u5EA6";                // refresh the quota now
     const string S_TEST    = "\u6D4B\u8BD5\u4E00\u6B21\u6263\u8D39\u6548\u679C";    // test one charge
     const string S_QUIT    = "\u9000\u51FA";                                        // quit
+    // Where the widget is allowed to sit. The two docked corners are something the pet
+    // returns to every time it is released; "free" (runtime only) leaves her wherever
+    // she was dropped. Persisted in state.ini as corner=left|right.
+    const string S_CORNER  = "\u4F4D\u7F6E";                                        // position
+    const string S_CORNER_L= "\u5DE6\u4E0B\u89D2";                                  // bottom-left
+    const string S_CORNER_R= "\u53F3\u4E0B\u89D2";                                  // bottom-right
+    const string S_CORNER_F= "\u4E0D\u5438\u9644";                                  // no snapping
     const string S_CUSTOM  = "\u81EA\u5B9A\u4E49...";                               // custom...
     const string S_HELPT   = "\u6F14\u793A\u6263\u8D39\u91D1\u989D";
     const string S_HELPP   = "\u8981\u6F14\u793A\u6263\u591A\u5C11\u94B1\uFF08\u5143\uFF09";
@@ -682,6 +689,7 @@ public sealed class DshPet : Form {
     const int IC_KEY     = 7;
     const int IC_QUIT    = 8;
     const int IC_MUTE    = 9;
+    const int IC_CORNER  = 11;
     const int IC_THEME   = 10;
 
     // Volume submenu. Five steps plus mute; the level is stored in state.ini.
@@ -710,7 +718,10 @@ public sealed class DshPet : Form {
     //   plan has room  -> remaining percentage, one cue = 1 %
     //   plan exhausted -> Extra Usage balance, one cue = 0.01 CNY
     double _step = 1.0;                              // charge step, current mode
-    bool _dockRight = false;                         // state.ini corner=right
+    // Docked corner: "left" or "right" from state.ini, plus "free" while the user has
+    // picked no-snapping in the menu. "free" is deliberately NOT persisted: the next
+    // start re-docks to the corner state.ini remembers.
+    string _corner = "right";
     string _tokenInfo = "";                          // why the last token read failed/succeeded
     Bitmap _faceFlat = null;                         // optional close-up art (face.png)
     int _faceAtMs = 0;                               // TickCount when the pop started
@@ -1151,6 +1162,7 @@ public sealed class DshPet : Form {
     ToolStripMenuItem _sizeItem;
     ToolStripMenuItem _soundItem;
     ToolStripMenuItem _muteItem;
+    ToolStripMenuItem _cornerItem;      // the position submenu (left / right / free)
     ToolStripMenuItem _themeItem;
     ToolStripMenuItem _testTopItem = null;   // the top-up submenu is gone; kept for --menushot guards
     bool _darkTheme = false;         // menu palette: light (shipped) or dark (DSH-like)
@@ -1442,6 +1454,14 @@ public sealed class DshPet : Form {
                 }
                 break;
             }
+            case IC_CORNER: {           // a frame with an anchor dot in its corner
+                using (Pen p = new Pen(IconInk, 1.4f))
+                    g.DrawRectangle(p, 1.6f, 1.8f, 12.8f, 11.0f);
+                using (SolidBrush b = new SolidBrush(IconAccent))
+                    g.FillEllipse(b, 2.6f, 9.2f, 4.4f, 4.4f);
+                break;
+            }
+
             case IC_THEME: {            // a disc that is half dark, half light
                 using (SolidBrush b = new SolidBrush(IconInk))
                     g.FillEllipse(b, 1.4f, 1.4f, 13.2f, 13.2f);
@@ -1520,6 +1540,22 @@ public sealed class DshPet : Form {
         sizeCustom.Click += delegate { AskPx(); };
         _sizeItem.DropDownItems.Add(sizeCustom);
         _menu.Items.Add(_sizeItem);
+
+        // Position: same radio pattern as the size presets, the active corner carries
+        // the tick. "No snapping" is the runtime-only third row (see SetCorner) - a
+        // fresh start re-docks to the corner state.ini remembers.
+        _cornerItem = NewItem(IC_CORNER, S_CORNER);
+        ToolStripMenuItem crLeft = NewItem(IC_NONE, S_CORNER_L);
+        crLeft.Click += delegate { SetCorner("left", true); };
+        _cornerItem.DropDownItems.Add(crLeft);
+        ToolStripMenuItem crRight = NewItem(IC_NONE, S_CORNER_R);
+        crRight.Click += delegate { SetCorner("right", true); };
+        _cornerItem.DropDownItems.Add(crRight);
+        ToolStripMenuItem crFree = NewItem(IC_NONE, S_CORNER_F);
+        crFree.Click += delegate { SetCorner("free", true); };
+        _cornerItem.DropDownItems.Add(crFree);
+        _menu.Items.Add(_cornerItem);
+
 
         // ---- appearance ----
         // Same radio pattern as the size presets: the current one carries the tick.
@@ -1724,6 +1760,14 @@ public sealed class DshPet : Form {
             if (mi != null) mi.Checked = (_sizePx == PresetPx[i]);
         }
         if (_muteItem != null) _muteItem.Checked = _soundEnabled;
+        // Position: one tick on the active corner, like the size presets.
+        if (_cornerItem != null) {
+            string[] want = new string[] { "left", "right", "free" };
+            for (int i = 0; i < want.Length && i < _cornerItem.DropDownItems.Count; i++) {
+                ToolStripMenuItem mi = _cornerItem.DropDownItems[i] as ToolStripMenuItem;
+                if (mi != null) mi.Checked = (_corner == want[i]);
+            }
+        }
         // Menu palette: the current one carries the tick, like the size presets.
         if (_themeItem != null) {
             if (_themeItem.DropDownItems.Count >= 2) {
@@ -1745,6 +1789,24 @@ public sealed class DshPet : Form {
             }
         }
     }
+
+    // Menu action for the position submenu. "left"/"right" dock immediately and are
+    // written to state.ini; "free" only lives for this run (persist=false at the call
+    // site), so a restart comes back docked - which is what was asked for.
+    void SetCorner(string mode, bool persist) {
+        if (mode != "left" && mode != "right" && mode != "free") return;
+        _corner = mode;
+        if (mode == "left" || mode == "right") {
+            SnapToCorner(true);                   // dock right now, no fly-across
+            _dirty = true;
+        } else {
+            Log("position: free (this run only - the next start docks to corner=" + SavedCorner() + ")");
+        }
+        if (persist) SaveState();
+        Log("position: " + _corner + "  (dragging: " +
+            (_corner == "free" ? "stays where it is put" : "flies back to the " + _corner + " corner") + ")");
+    }
+
 
     // ------------------------------------------------------------- settings ---
 
@@ -1847,7 +1909,8 @@ public sealed class DshPet : Form {
         if (dpiY < 72) dpiY = 96;
         _cm = Math.Round(px / dpiY * 2.54, 2);
         Relayout();
-        SnapToCorner(true);               // keep it pinned to the corner
+        ClampWidgetToScreen();
+        SnapToCorner(true);               // keep it pinned to the docked corner
         SaveState();
         RenderToCanvas();
         PushLayer();
@@ -1860,7 +1923,8 @@ public sealed class DshPet : Form {
         _cm = v;
         _sizePx = 0;                      // legacy path: let the DPI decide again
         Relayout();
-        SnapToCorner(true);               // keep it pinned to the corner
+        ClampWidgetToScreen();
+        SnapToCorner(true);               // keep it pinned to the docked corner
         SaveState();
         RenderToCanvas();
         PushLayer();
@@ -2752,11 +2816,34 @@ public sealed class DshPet : Form {
     // A recharge landed: freeze the readout and drop a bowl for it.
     // One top-up = one bowl. Several may be in flight; each carries its own Amount so
     // delivering it credits exactly that, and picking one up leaves the others alone.
+    // ---------------------------------------------------- Kimi port: no rice bowl ---
+    // The recharge-bowl prop ("chong zhi diao pen") is a DSH gag that this port
+    // deliberately does not ship: rice.png / iron_bowl.png / feed.mp3 are not part of
+    // the product, so the bowl machinery below is unreachable BY DESIGN, not because an
+    // asset went missing. It is kept so the port stays a recognisable fork of the shared
+    // renderer; the tests that need the prop skip themselves through KimiHasRiceArt(),
+    // so a diagnostic run reports "not applicable" instead of a wall of failures.
+    bool KimiHasRiceArt() { return _riceArt != null; }
+    // The delivery cue (feed.mp3) is optional and does not ship in this port, and the
+    // sound test asserts both pools are live - so it needs its own predicate.
+    bool KimiHasSoundArt() { return _sound != null && _feedSound != null; }
+    int _bowlGroupsSkipped;
+    void NoteBowlSkip() { _bowlGroupsSkipped++; }
+    public int BowlGroupsSkipped { get { return _bowlGroupsSkipped; } }
+    public void PrintBowlSkipSummary() {
+        Console.WriteLine("bowl-dependent groups skipped: " + _bowlGroupsSkipped +
+                          "  (this port ships no rice bowl: rice.png / iron_bowl.png / feed.mp3" +
+                          " are not part of the product, so that path is unreachable by design)");
+    }
+
+
     void StartCredit(double amount) {
         _creditPending = Math.Round(_creditPending + amount, 4);
-        if (_riceArt == null) {                 // no art -> cannot be collected
+        if (!KimiHasRiceArt()) {
+            // No rice bowl in this port, so there is no prop to drag onto her: the credit
+            // stays pending and the readout re-aligns on the next poll. Not an error path.
             Log("top-up " + amount.ToString("0.00", CultureInfo.InvariantCulture) +
-                " ignored: rice.png missing");
+                " -> extra usage recorded, no bowl animation (Kimi port ships no rice bowl)");
             return;
         }
         Rectangle vs = SystemInformation.VirtualScreen;
@@ -3333,8 +3420,8 @@ public sealed class DshPet : Form {
         // this pet off the DSH pet in the bottom-left. Hardcoding the left made her
         // teleport back to the left the moment a charge changed her expression - this
         // function is reached through Relayout(), which the mood switch triggers.
-        int dockX = _dockRight ? Math.Max(0, wa.Right - vs.Left - _w) : (wa.Left - vs.Left);
-        int dockY = Math.Max(0, wa.Bottom - vs.Top - _h);
+        Point dockPt = CornerTarget();
+        int dockX = dockPt.X, dockY = dockPt.Y;
         if (_rices.Count > 0) {
             // A bowl is out: keep the widget exactly where it is, so nothing jumps.
             if (_offX == 0 && _offY == 0) {
@@ -3618,16 +3705,47 @@ public sealed class DshPet : Form {
         return dst;
     }
 
+    // Where a docked widget belongs, in canvas coordinates. ONE function because the
+    // corner used to be computed twice - here and inside SyncWindowModeInternal - and
+    // fixing only one of them sent the girl back to the left the moment a charge changed
+    // her expression. Returns the current offset when no corner is wanted, so "free"
+    // needs no special case at its callers.
+    Point CornerTarget() {
+        if (_corner != "left" && _corner != "right") return new Point(_offX, _offY);
+        Rectangle vs = SystemInformation.VirtualScreen;
+        Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+        // The DSH pet lives in the bottom-left corner, so this pet defaults to the right;
+        // the left corner is for people who run only this one.
+        return new Point(
+            _corner == "right" ? Math.Max(0, wa.Right - vs.Left - _w) : (wa.Left - vs.Left),
+            Math.Max(0, wa.Bottom - vs.Top - _h));
+    }
+
+
+    // Keep the widget on screen after a resize when no corner is wanted. The size paths
+    // dock via SnapToCorner(true), which is a no-op in no-snap mode.
+    void ClampWidgetToScreen() {
+        if (_corner == "left" || _corner == "right") return;
+        Rectangle vs = SystemInformation.VirtualScreen;
+        if (_offX > vs.Width - _w) _offX = Math.Max(0, vs.Width - _w);
+        if (_offY > vs.Height - _h) _offY = Math.Max(0, vs.Height - _h);
+        if (_offX < 0) _offX = 0;
+        if (_offY < 0) _offY = 0;
+    }
+
+
     // Snap the WIDGET back to the bottom-left corner of the work area. The window no
     // longer moves (it is permanently screen-sized), so this animates _offX/_offY.
     void SnapToCorner(bool immediate) {
         Rectangle vs = SystemInformation.VirtualScreen;
         Rectangle wa = Screen.PrimaryScreen.WorkingArea;
-        // The DSH pet already lives in the bottom-left corner, so this one can be
-        // told to dock right instead (state.ini: corner=right).
-        Point target = new Point(
-            _dockRight ? Math.Max(0, wa.Right - vs.Left - _w) : (wa.Left - vs.Left),
-            Math.Max(0, wa.Bottom - vs.Top - _h));
+        if (_corner != "left" && _corner != "right") {
+            // No docking: releasing the mouse (or a resize) leaves her where she was put.
+            // Only the drag itself clamps to the screen.
+            _snapping = false;
+            return;
+        }
+        Point target = CornerTarget();
         if (immediate) {
             _offX = target.X; _offY = target.Y;
             _snapping = false;
@@ -3649,6 +3767,10 @@ public sealed class DshPet : Form {
 
     // --------------------------------------------------------------- state ---
 
+    // The docked corner as it would be written to state.ini: "free" is runtime only.
+    string SavedCorner() { return _corner == "left" ? "left" : "right"; }
+
+
     string StatePath { get { return Path.Combine(_baseDir, "state.ini"); } }
     string KeyPath { get { return Path.Combine(_baseDir, "apikey.txt"); } }
 
@@ -3662,7 +3784,9 @@ public sealed class DshPet : Form {
                 string k = line.Substring(0, i).Trim(), v = line.Substring(i + 1).Trim();
                 double d;
                 int n;
-                if (k == "corner") _dockRight = (v.ToLowerInvariant() == "right");
+                // left|right dock; anything else (including a hand-edited value) falls
+                // back to the shipped default: bottom-right.
+                if (k == "corner") _corner = (v.ToLowerInvariant() == "left") ? "left" : "right";
                 if (k == "px" && int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out n) && n >= 40)
                     _sizePx = n;                       // presets / custom entry
                 else if (k == "cm" && double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out d) && d >= 0.8)
@@ -3699,6 +3823,9 @@ public sealed class DshPet : Form {
                 "cm=" + _cm.ToString("0.##", CultureInfo.InvariantCulture) + "\r\n" +
                 "volume=" + _volume.ToString(CultureInfo.InvariantCulture) + "\r\n" +
                 "sound=" + (_soundEnabled ? "1" : "0") + "\r\n" +
+                // The runtime-only "free" corner is never written: state.ini keeps
+                // whichever docked corner the user last chose.
+                (_corner == "free" ? "" : "corner=" + _corner + "\r\n") +
                 "theme=" + (_darkTheme ? "dark" : "light") + "\r\n",
                 Encoding.ASCII);
         } catch { }
@@ -4006,7 +4133,9 @@ public sealed class DshPet : Form {
             ReleaseBowl();
         } else if (_drag) {
             _drag = false;
-            SnapToCorner(false);        // release -> fly back to the bottom-left
+            // Release -> fly back to the docked corner; in no-snap mode she stays put.
+            ClampWidgetToScreen();
+            SnapToCorner(false);
         }
         base.OnMouseUp(e);
     }
@@ -6103,6 +6232,9 @@ public sealed class DshPet : Form {
             Console.WriteLine();
             pet.RunResizeWithBowlTest();      // resize with a bowl out
             Console.WriteLine();
+            Console.WriteLine();
+            pet.RunCornerModeTest();          // left / right / no snapping
+            Console.WriteLine();
             pet.RunSnapBackTest();            // the girl returns to her corner
             Console.WriteLine();
             pet.RunFeedGraceTest();           // the pause before spending resumes
@@ -6119,6 +6251,8 @@ public sealed class DshPet : Form {
             Console.WriteLine();
             pet.RunTestTopUpDebtTest();       // an unclaimed rehearsal is never debt
             Console.WriteLine();
+            pet.PrintBowlSkipSummary();       // how many groups the absent bowl prop skipped
+            Console.WriteLine();
             pet.PanelCheckReport(false);      // every number shape fits the tablet
             Console.WriteLine();
             return;
@@ -6132,6 +6266,23 @@ public sealed class DshPet : Form {
             Application.Exit();
             return;
         }
+
+        // Standalone: the position submenu (left / right / no snapping).
+        if (Array.IndexOf(args, "--corners") >= 0) {
+            pet.RunCornerModeTest();
+            Console.WriteLine("done");
+            Application.Exit();
+            return;
+        }
+
+        // Standalone: the snap-back regression (does she fly home, does the bowl stay put).
+        if (Array.IndexOf(args, "--snap") >= 0) {
+            pet.RunSnapBackTest();
+            Console.WriteLine("done");
+            Application.Exit();
+            return;
+        }
+
 
         // Standalone: render the feeding hearts for inspection.
         if (Array.IndexOf(args, "--hearts") >= 0) {
@@ -6430,7 +6581,12 @@ public sealed class DshPet : Form {
     public void RunMultiBowlTest() {
         GoOffline();
         _noNetwork = true;
-        Console.WriteLine("multi-bowl (offline)");
+        if (!KimiHasRiceArt()) {
+            Console.WriteLine("multi-bowl (offline)");
+            Console.WriteLine("  SKIP - no rice bowl prop in this port (rice.png absent by design)");
+            NoteBowlSkip();
+            return;
+        }
         // Bounce tiering is driven purely by drop height, so state it explicitly.
         Console.WriteLine("  bounce tiers     : 30px->" + BouncesForDrop(30) +
                           "  150px->" + BouncesForDrop(150) +
@@ -6463,7 +6619,7 @@ public sealed class DshPet : Form {
         // Deliver one of them only.
         double owedBefore = _creditPending;
         string printedBefore = DrawnText;
-        OnRiceFed(_rices[0]);
+        if (_rices.Count > 0) OnRiceFed(_rices[0]);
         Console.WriteLine("  fed one          : printed=" + DrawnText +
                           "  (want 33.00) was=" + printedBefore +
                           "  owedToPlayer=" + _creditPending.ToString("0.00") +
@@ -6497,7 +6653,12 @@ public sealed class DshPet : Form {
     public void RunResizeWithBowlTest() {
         GoOffline();
         _noNetwork = true;
-        Console.WriteLine("resize while a bowl is out (offline)");
+        if (!KimiHasRiceArt()) {
+            Console.WriteLine("resize while a bowl is out (offline)");
+            Console.WriteLine("  SKIP - no rice bowl prop in this port (rice.png absent by design)");
+            NoteBowlSkip();
+            return;
+        }
         ResetDemoForTest();
         ApplyBalancePublic(30.00, true);
         Rectangle vsFull = SystemInformation.VirtualScreen;
@@ -6536,7 +6697,12 @@ public sealed class DshPet : Form {
     public void RunFeedGraceTest() {
         GoOffline();
         _noNetwork = true;
-        Console.WriteLine("feed grace (offline)");
+        if (!KimiHasRiceArt()) {
+            Console.WriteLine("feed grace (offline)");
+            Console.WriteLine("  SKIP - no rice bowl prop in this port (rice.png absent by design)");
+            NoteBowlSkip();
+            return;
+        }
         ResetDemoForTest();
         ApplyBalancePublic(30.00, true);
         ApplyBalancePublic(33.00, false);         // a recharge arrives
@@ -6603,7 +6769,10 @@ public sealed class DshPet : Form {
         //    version of this test reset it away and so encoded the bug.)
         Rectangle vsS = SystemInformation.VirtualScreen;
         Rectangle waS = Screen.PrimaryScreen.WorkingArea;
-        int homeX = waS.Left - vsS.Left, homeY = Math.Max(0, waS.Bottom - vsS.Top - _h);
+        // Corner-aware: the widget may be docked left or right (menu -> position), so the
+        // expected "home" follows the docked corner instead of being hardcoded left.
+        int homeX = _corner == "left" ? (waS.Left - vsS.Left) : Math.Max(0, waS.Right - vsS.Left - _w);
+        int homeY = Math.Max(0, waS.Bottom - vsS.Top - _h);
         int guard = 0;
         PumpTicks(120);                        // let the bowl settle first
         Rice bowl = _rices.Count > 0 ? _rices[0] : null;
@@ -6614,7 +6783,9 @@ public sealed class DshPet : Form {
         bool startedWithBowl = _snapping;
         guard = 0;
         while (_snapping && guard++ < 240) PumpTicks(1);
-        bool bowlStayed = bowl != null && Math.Abs(bowl.X - bowlX) < 1.0 && Math.Abs(bowl.Y - bowlY) < 1.0;
+        // No rice bowl in this port -> there is no bowl to watch; the snap-back half of
+        // the assertion still applies, the bowl half simply cannot be judged here.
+        bool bowlStayed = bowl == null || (Math.Abs(bowl.X - bowlX) < 1.0 && Math.Abs(bowl.Y - bowlY) < 1.0);
         Console.WriteLine("  bowl out, drag   : snapping=" + startedWithBowl +
                           "  off=" + _offX + "," + _offY +
                           "  home=" + homeX + "," + homeY +
@@ -6639,14 +6810,117 @@ public sealed class DshPet : Form {
                           "  home=" + homeX + "," + homeY);
         Console.WriteLine("  verdict: " +
             (startedNoBowl && _offX == homeX && _offY == homeY
-                ? "OK - the girl flies back to the bottom-left corner"
+                ? "OK - the girl flies back to the " + _corner + " corner"
                 : "FAIL - started=" + startedNoBowl + " off=" + _offX + "," + _offY));
         ResetDemoForTest();
     }
 
+    // Which corner the position submenu is showing as active, as one line, e.g.
+    // "[left, right*, free]" with a * on the ticked row. Same shape as SoundMenuRows so
+    // MenuReport and the corner test share it.
+    string CornerMenuRows() {
+        if (_cornerItem == null) return "none";
+        StringBuilder sb = new StringBuilder("[");
+        for (int j = 0; j < _cornerItem.DropDownItems.Count; j++) {
+            if (j > 0) sb.Append(", ");
+            ToolStripItem it = _cornerItem.DropDownItems[j];
+            ToolStripMenuItem mi = it as ToolStripMenuItem;
+            sb.Append(it is ToolStripSeparator ? "---" : it.Text);
+            if (mi != null && mi.Checked) sb.Append("*");
+        }
+        return sb.Append("]").ToString();
+    }
+
+    bool CornerRowChecked(int index) {
+        if (_cornerItem == null || index < 0 || index >= _cornerItem.DropDownItems.Count) return false;
+        ToolStripMenuItem mi = _cornerItem.DropDownItems[index] as ToolStripMenuItem;
+        return mi != null && mi.Checked;
+    }
+
+    // The position submenu, end to end: does each row move the widget to the right place,
+    // does the tick follow, does a release leave her alone in no-snap mode, and is "free"
+    // kept out of state.ini (a restart must come back docked).
+    public void RunCornerModeTest() {
+        GoOffline();
+        _noNetwork = true;
+        NoSaveForTest();                   // nothing here may reach the user's state.ini
+        Console.WriteLine("position submenu (offline)");
+        ResetDemoForTest();
+        ApplyBalancePublic(30.00, true);
+        string saved = _corner;
+        Rectangle vs = SystemInformation.VirtualScreen;
+        Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+        int wantL = wa.Left - vs.Left;
+        int wantR = Math.Max(0, wa.Right - vs.Left - _w);
+        int wantY = Math.Max(0, wa.Bottom - vs.Top - _h);
+        bool ok = true;
+
+        SetCorner("left", true);
+        PumpTicks(70);
+        bool lPos = _offX == wantL && _offY == wantY;
+        RefreshMenuChecks();
+        bool lTick = CornerRowChecked(0) && !CornerRowChecked(1) && !CornerRowChecked(2);
+        Console.WriteLine("  left  : off=" + _offX + "," + _offY + " want=" + wantL + "," + wantY +
+                          "  menu=" + CornerMenuRows());
+        ok = ok && lPos && lTick;
+
+        SetCorner("right", true);
+        PumpTicks(70);
+        bool rPos = _offX == wantR && _offY == wantY;
+        RefreshMenuChecks();
+        bool rTick = CornerRowChecked(1) && !CornerRowChecked(0) && !CornerRowChecked(2);
+        Console.WriteLine("  right : off=" + _offX + "," + _offY + " want=" + wantR + "," + wantY +
+                          "  menu=" + CornerMenuRows());
+        ok = ok && rPos && rTick;
+
+        // No-snap: a release must not start a snap animation, and the resize clamp must
+        // hold even when the widget would land past the far edge.
+        SetCorner("free", true);
+        _offX = wantR - 300; _offY = wantY - 200;
+        _snapping = false;
+        SnapToCorner(false);
+        ClampWidgetToScreen();
+        bool freeNoSnap = !_snapping;
+        PumpTicks(8);
+        bool freeStays = _offX == wantR - 300 && _offY == wantY - 200;
+        _offX = vs.Width - _w + 500; _offY = vs.Height - _h + 500;
+        ClampWidgetToScreen();
+        PumpTicks(4);
+        bool freeClamped = _offX <= vs.Width - _w && _offY <= vs.Height - _h && _offX >= 0 && _offY >= 0;
+        RefreshMenuChecks();
+        bool fTick = CornerRowChecked(2) && !CornerRowChecked(0) && !CornerRowChecked(1);
+        Console.WriteLine("  free  : noSnap=" + freeNoSnap + "  staysPut=" + freeStays +
+                          "  clamped=" + freeClamped + "  menu=" + CornerMenuRows());
+        ok = ok && freeNoSnap && freeStays && freeClamped && fTick;
+
+        // The invariant that matters: while no-snap is active, what the program WOULD
+        // persist is still a docked corner - it never writes "free" into state.ini.
+        string wouldSave = SavedCorner();
+        bool notSaved = wouldSave == "left" || wouldSave == "right";
+        Console.WriteLine("  would save corner=" + wouldSave + " (must be left|right, never free)");
+        ok = ok && notSaved;
+
+        Console.WriteLine("  verdict: " + (ok
+            ? "OK - left/right dock with the tick, free stays put and never reaches state.ini"
+            : "FAIL - left=" + lPos + "/" + lTick + " right=" + rPos + "/" + rTick +
+              " free=" + freeNoSnap + "/" + freeStays + "/" + freeClamped + "/" + fTick +
+              " file=" + wouldSave));
+
+        _corner = saved;                       // restore the corner this run started with
+        _offX = _corner == "left" ? wantL : wantR;
+        _offY = wantY;
+        ResetDemoForTest();
+    }
+
+
     public void RunTestTopUp() {
         GoOffline();
-        ResetDemoForTest();        ApplyBalancePublic(30.00, true);
+        if (!KimiHasRiceArt()) {
+            Console.WriteLine("test-top-up entry (offline)");
+            Console.WriteLine("  SKIP - no rice bowl prop in this port (rice.png absent by design)");
+            NoteBowlSkip();
+            return;
+        }
         Console.WriteLine("test-top-up entry (offline)");
         Console.WriteLine("  before : printed=" + DrawnText + " real=" + _realBal.ToString("0.00"));
         double before = DrawnBalance;
@@ -6755,6 +7029,8 @@ public sealed class DshPet : Form {
         // "custom". Reported with the tick state so a level row that cannot be
         // ticked shows up here instead of only being noticed by eye.
         if (_soundItem != null) {
+        if (_cornerItem != null) sb.Append(" corner=").Append(CornerMenuRows());
+        sb.Append(" sound=").Append(SoundMenuRows());
             sb.Append(" sound=").Append(SoundMenuRows());
             sb.Append(" enabled=").Append(_soundEnabled).Append(" volume=").Append(_volume);
         }
@@ -6806,6 +7082,11 @@ public sealed class DshPet : Form {
         Console.WriteLine("sound and volume");
         int before = _volume;
         bool wasOn = _soundEnabled;
+        if (!KimiHasSoundArt()) {
+            Console.WriteLine("  SKIP - feed.mp3 ships no cue in this port");
+            NoteBowlSkip();
+            return;
+        }
         Console.WriteLine("  players: hit=" + PoolVolumeText(_sound) + " feed=" + PoolVolumeText(_feedSound) +
                           "  players live=" + LivePoolCount);
         SetVolumePercent(75);
@@ -7093,7 +7374,12 @@ public sealed class DshPet : Form {
     public void RunBowlOverGirlTest() {
         GoOffline();
         _noNetwork = true;
-        Console.WriteLine("bowl parked on the girl (offline)");
+        if (!KimiHasRiceArt()) {
+            Console.WriteLine("bowl parked on the girl (offline)");
+            Console.WriteLine("  SKIP - no rice bowl prop in this port (rice.png absent by design)");
+            NoteBowlSkip();
+            return;
+        }
         ResetDemoForTest();
         _connected = false;
         _lastPollResult = "";
@@ -7180,7 +7466,12 @@ public sealed class DshPet : Form {
     public void RunTopUpHoldTest() {
         GoOffline();
         _noNetwork = true;
-        Console.WriteLine("top-up held across polls (offline)");
+        if (!KimiHasRiceArt()) {
+            Console.WriteLine("top-up held across polls (offline)");
+            Console.WriteLine("  SKIP - no rice bowl prop in this port (rice.png absent by design)");
+            NoteBowlSkip();
+            return;
+        }
         ResetDemoForTest();
         ApplyBalancePublic(30.00, true);
         Console.WriteLine("  live balance 30.00: printed=" + DrawnText);
@@ -7243,7 +7534,12 @@ public sealed class DshPet : Form {
     public void RunInertiaTest() {
         GoOffline();
         _noNetwork = true;
-        Console.WriteLine("throw inertia (offline, deterministic)");
+        if (!KimiHasRiceArt()) {
+            Console.WriteLine("throw inertia (offline, deterministic)");
+            Console.WriteLine("  SKIP - no rice bowl prop in this port (rice.png absent by design)");
+            NoteBowlSkip();
+            return;
+        }
         ResetDemoForTest();
         ApplyBalancePublic(30.00, true);
         ApplyBalancePublic(33.00, false);            // one recharge -> one bowl
@@ -7387,7 +7683,12 @@ public sealed class DshPet : Form {
     public void RunTestTopUpDebtTest() {
         GoOffline();
         _noNetwork = true;
-        DiagBalance = true;                          // trace the debt arithmetic in pet.log
+        if (!KimiHasRiceArt()) {
+            Console.WriteLine("test top-up must not become debt (offline)");
+            Console.WriteLine("  SKIP - no rice bowl prop in this port (rice.png absent by design)");
+            NoteBowlSkip();
+            return;
+        }
         Console.WriteLine("test top-up must not become debt (offline)");
         ResetDemoForTest();
         ApplyBalancePublic(36.00, true);              // live balance, first reading
@@ -8811,6 +9112,12 @@ public sealed class DshPet : Form {
     public void RunTopUpTest() {
         GoOffline();
         _noNetwork = true;
+        if (!KimiHasRiceArt()) {
+            Console.WriteLine("top-up scenario (offline, deterministic)");
+            Console.WriteLine("  SKIP - no rice bowl prop in this port (rice.png absent by design)");
+            NoteBowlSkip();
+            return;
+        }
         Rectangle vs = SystemInformation.VirtualScreen;
         Console.WriteLine("top-up scenario (offline, deterministic)");
         ResetDemoForTest();

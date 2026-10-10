@@ -30,3 +30,6 @@ art/preview/tray_icon_256.png
 Thumbs.db
 desktop.ini
 *.tmp
+
+# ---- local rollback copies of the main script (never shipped) ----
+kimi_pet.ps1.bak-*

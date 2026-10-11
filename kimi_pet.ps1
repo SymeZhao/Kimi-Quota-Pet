@@ -7338,6 +7338,14 @@ public sealed class DshPet : Form {
         GoOffline();
         _noNetwork = true;
         Console.WriteLine("animation tail (offline)");
+        // This check compares PIXELS, so which resting face it compares must not depend on
+        // the wall clock: after 23:00 night mode makes the resting face the worried one,
+        // and since the reference shot is taken before the first tick settles the
+        // expression, the reference (smile) and the final frame (worried) differed by the
+        // whole sprite - 137k pixels of "leftover" that were nothing of the sort. Found by
+        // following 硬盘更新流程.md §3 at 23:56. Pin the daytime face and settle it first.
+        _nightOn = false;
+        SetExpression(EXPR_HAPPY);
         ResetDemoForTest();
         // Freeze everything that can change the widget behind this test's back: the
         // offline alert dot appears whenever _lastPollResult is non-empty and the

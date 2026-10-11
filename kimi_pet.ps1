@@ -722,6 +722,16 @@ public sealed class DshPet : Form {
     // picked no-snapping in the menu. "free" is deliberately NOT persisted: the next
     // start re-docks to the corner state.ini remembers.
     string _corner = "right";
+    // ---- night mode (resting face only) ----------------------------------
+    // Asked for by the author: from 23:00 until 06:00, local machine time, the resting
+    // face is the worried one. It replaces ONLY the resting face - a charge cue, a
+    // broken reading and a low quota keep their own faces (see UpdateExpression).
+    bool _nightOn = true;            // state.ini night=on|off
+    int _nightIn = 23;               // state.ini nightIn=<hour>, inclusive
+    int _nightOut = 6;               // state.ini nightOut=<hour>, exclusive
+    bool _nightNow;                  // cached window answer
+    int _nightProbeAt;               // TickCount of the last clock read
+    const int NightProbeMs = 30000;
     string _tokenInfo = "";                          // why the last token read failed/succeeded
     Bitmap _faceFlat = null;                         // optional close-up art (face.png)
     int _faceAtMs = 0;                               // TickCount when the pop started
@@ -2128,6 +2138,11 @@ public sealed class DshPet : Form {
             want = EXPR_CALM;                             // the reading broke
         } else if (LowQuota) {
             want = EXPR_ALOOF;                            // quota is running out
+        } else if (NightMode) {
+            // Night: the resting face is the worried one (left-bottom artwork,
+            // expression_12). Everything above keeps its own face, so a charge, a
+            // broken reading and a low quota stay distinguishable at any hour.
+            want = EXPR_ALOOF;
         } else {
             want = EXPR_HAPPY;                            // the resting face
         }
@@ -2141,6 +2156,33 @@ public sealed class DshPet : Form {
     }
     static bool DiagExpr = false;
     public void SetDiagExpr(bool on) { DiagExpr = on; }
+
+    // Is the local clock inside the night window? Pure, so the diagnostic can feed it
+    // fake hours. A window that does not wrap (nightIn < nightOut) is handled by the
+    // same comparison: 22 -> 23 means "the 22:00 hour only". nightIn == nightOut is an
+    // empty window (never night) rather than an all-day one.
+    static bool IsNightHour(int hour, int nightIn, int nightOut) {
+        if (nightIn == nightOut) return false;
+        if (nightIn < nightOut) return hour >= nightIn && hour < nightOut;
+        return hour >= nightIn || hour < nightOut;     // wraps past midnight
+    }
+
+    // state.ini may name something that is not an hour.
+    static int ClampHour(int h) { return h < 0 ? 0 : (h > 23 ? 23 : h); }
+
+    // The local machine clock, sampled at most every NightProbeMs. One unsigned
+    // subtraction also survives TickCount wrapping (-2^31).
+    bool NightMode {
+        get {
+            if (!_nightOn) return false;
+            int now = Environment.TickCount;
+            if (unchecked(now - _nightProbeAt) >= NightProbeMs) {
+                _nightProbeAt = now;
+                _nightNow = IsNightHour(DateTime.Now.Hour, _nightIn, _nightOut);
+            }
+            return _nightNow;
+        }
+    }
 
     // "Running out" for the worried face: under 10 % of the plan quota left, or under
     // 5 CNY left in the Extra Usage wallet. Decided from the same number the tablet
@@ -3787,6 +3829,13 @@ public sealed class DshPet : Form {
                 // left|right dock; anything else (including a hand-edited value) falls
                 // back to the shipped default: bottom-right.
                 if (k == "corner") _corner = (v.ToLowerInvariant() == "left") ? "left" : "right";
+                // Night mode: "night" is the switch, the hours are optional and fall
+                // back to the shipped 23 -> 6, so a hand-edited file stays valid.
+                if (k == "night") _nightOn = (v.ToLowerInvariant() != "off" && v != "0");
+                else if (k == "nightIn" && int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out n))
+                    _nightIn = ClampHour(n);
+                else if (k == "nightOut" && int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out n))
+                    _nightOut = ClampHour(n);
                 if (k == "px" && int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out n) && n >= 40)
                     _sizePx = n;                       // presets / custom entry
                 else if (k == "cm" && double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out d) && d >= 0.8)
@@ -3826,6 +3875,9 @@ public sealed class DshPet : Form {
                 // The runtime-only "free" corner is never written: state.ini keeps
                 // whichever docked corner the user last chose.
                 (_corner == "free" ? "" : "corner=" + _corner + "\r\n") +
+                "night=" + (_nightOn ? "on" : "off") + "\r\n" +
+                "nightIn=" + _nightIn.ToString(CultureInfo.InvariantCulture) + "\r\n" +
+                "nightOut=" + _nightOut.ToString(CultureInfo.InvariantCulture) + "\r\n" +
                 "theme=" + (_darkTheme ? "dark" : "light") + "\r\n",
                 Encoding.ASCII);
         } catch { }
@@ -6283,6 +6335,14 @@ public sealed class DshPet : Form {
             return;
         }
 
+
+        // Standalone: the night-mode resting face (fake windows, real state machine).
+        if (Array.IndexOf(args, "--night") >= 0) {
+            pet.RunNightTest();
+            Console.WriteLine("done");
+            Application.Exit();
+            return;
+        }
 
         // Standalone: render the feeding hearts for inspection.
         if (Array.IndexOf(args, "--hearts") >= 0) {
@@ -9109,6 +9169,119 @@ public sealed class DshPet : Form {
     // mouse: the server tops up, the readout must NOT follow, the bowl must
     // spawn, and only after the bowl is delivered may the number climb.
     // Returns a compact one-line report per step so the console shows the story.
+    // Night mode. The window rules are pure, so they can be fed fake hours; the face
+    // itself goes through the real UpdateExpression. For the "daytime" contrast the
+    // window is derived from the actual clock, so the test cannot pass by accident at
+    // one time of day and fail at another.
+    public void RunNightTest() {
+        GoOffline();
+        _noNetwork = true;
+        NoSaveForTest();
+        Console.WriteLine("night mode (local clock) [now=" + DateTime.Now.ToString("yyyy-MM-dd HH:mm") + "]");
+        bool on = _nightOn, stale = _showStale;
+        int iIn = _nightIn, iOut = _nightOut;
+        double realBal = _realBal;
+        int hour = DateTime.Now.Hour;
+        bool ok = true;
+        Console.WriteLine("  window   : " + iIn + ":00 - " + iOut + ":00   switch=" + (on ? "on" : "off"));
+
+        // --- the window rules, fed fake hours ---
+        bool wraps = IsNightHour(23, 23, 6) && IsNightHour(0, 23, 6) && IsNightHour(5, 23, 6)
+                     && !IsNightHour(6, 23, 6) && !IsNightHour(12, 23, 6);
+        bool plain = !IsNightHour(21, 22, 23) && IsNightHour(22, 22, 23) && !IsNightHour(23, 22, 23);
+        bool empty = !IsNightHour(3, 8, 8);
+        Console.WriteLine("  boundary : 23 yes, 00 yes, 05 yes, 06 no, 12 no -> " + (wraps ? "OK" : "FAIL"));
+        Console.WriteLine("  same-day : 22->23 means the 22:00 hour only   -> " + (plain ? "OK" : "FAIL"));
+        Console.WriteLine("  empty    : nightIn == nightOut is never night -> " + (empty ? "OK" : "FAIL"));
+        ok = ok && wraps && plain && empty;
+
+        // --- wrap past midnight, asserted through the state machine with fake hours
+        //     (23 -> 6 must cover 01:00 and must not cover 13:00) ---
+        ApplyBalancePublic(30.00, true);
+        _nightOn = true;
+        SetNightHoursForTest(23, 6);
+        SetCurrentHourForTest(1);
+        UpdateExpression(0);
+        bool wrapNight = _expr == EXPR_ALOOF;
+        string at1 = ExprName(_expr);
+        SetCurrentHourForTest(13);
+        UpdateExpression(0);
+        bool wrapDay = _expr == EXPR_HAPPY;
+        string at13 = ExprName(_expr);
+        Console.WriteLine("  wrap     : 23->6 at 01:00 -> " + at1 + " (want worried)  at 13:00 -> " +
+                          at13 + " (want happy) -> " + ((wrapNight && wrapDay) ? "OK" : "FAIL"));
+        ok = ok && wrapNight && wrapDay;
+
+        // --- low quota keeps its own face at night (it must not be swallowed) ---
+        SetCurrentHourForTest(1);
+        ApplyBalancePublic(2.00, true);               // Extra Usage below the 5 CNY floor
+        UpdateExpression(0);
+        bool lowAtNight = _expr == EXPR_ALOOF && LowQuota;
+        Console.WriteLine("  lowquota : night + balance 2.00 -> expr=" + ExprName(_expr) +
+                          " LowQuota=" + LowQuota + " -> " + (lowAtNight ? "OK" : "FAIL"));
+        ok = ok && lowAtNight;
+        ApplyBalancePublic(30.00, true);
+
+        // --- a healthy balance, so LowQuota cannot be what fills the resting face ---
+        ApplyBalancePublic(30.00, true);
+        bool healthy = !LowQuota;
+        Console.WriteLine("  balance  : forced healthy=" + healthy + " (LowQuota=" + LowQuota + ")");
+
+        // --- night: a 23->06 style window that is GUARANTEED to contain the current
+        //     hour, so this holds whether the diagnostic runs at noon or at 3 am ---
+        int nightIn = hour, nightOut = (hour + 2) % 24;
+        _nightOn = true;
+        SetNightHoursForTest(nightIn, nightOut);
+        ForceNightProbeNow();
+        bool nightIsActive = NightMode;
+        UpdateExpression(0);
+        bool nightFace = _expr == EXPR_ALOOF && nightIsActive;
+        Console.WriteLine("  night    : active=" + nightIsActive + " window=" + nightIn + "->" + nightOut +
+                          " now=" + hour + ":xx  expr=" + ExprName(_expr) +
+                          " want=" + ExprName(EXPR_ALOOF) + " -> " + (nightFace ? "OK" : "FAIL"));
+        ok = ok && nightFace && healthy;
+
+        // --- daytime: a one-hour window that cannot contain the current hour ---
+        int dayIn = (hour == 8) ? 9 : 8, dayOut = dayIn + 1;
+        _nightOn = true;
+        SetNightHoursForTest(dayIn, dayOut);
+        ForceNightProbeNow();
+        bool dayIsActive = NightMode;
+        UpdateExpression(0);
+        bool dayFace = _expr == EXPR_HAPPY && !dayIsActive;
+        Console.WriteLine("  daytime  : active=" + dayIsActive + " window=" + dayIn + "->" + dayOut +
+                          " now=" + hour + ":xx  expr=" + ExprName(_expr) +
+                          " want=" + ExprName(EXPR_HAPPY) + " -> " + (dayFace ? "OK" : "FAIL"));
+        ok = ok && dayFace;
+
+        // --- priority: a broken reading still wins over the night face ---
+        SetNightHoursForTest(nightIn, nightOut);
+        ForceNightProbeNow();
+        _showStale = true;
+        UpdateExpression(0);
+        bool offFace = _expr == EXPR_CALM;
+        Console.WriteLine("  priority : night + no reading -> expr=" + ExprName(_expr) +
+                          " want=" + ExprName(EXPR_CALM) + " -> " + (offFace ? "OK" : "FAIL"));
+        ok = ok && offFace;
+        _showStale = false;
+
+        // --- switch off restores the plain resting face at the same hour ---
+        _nightOn = false;
+        UpdateExpression(0);
+        bool offSwitch = _expr == EXPR_HAPPY;
+        Console.WriteLine("  switch   : night=off -> expr=" + ExprName(_expr) +
+                          " want=" + ExprName(EXPR_HAPPY) + " -> " + (offSwitch ? "OK" : "FAIL"));
+        ok = ok && offSwitch;
+
+        Console.WriteLine("  verdict: " + (ok
+            ? "OK - worried face inside 23:00-06:00, resting smile outside, other states untouched"
+            : "FAIL"));
+
+        _nightOn = on; _nightIn = iIn; _nightOut = iOut; _showStale = stale;
+        if (!double.IsNaN(realBal)) ApplyBalancePublic(realBal, true);
+        ResetDemoForTest();
+    }
+
     public void RunTopUpTest() {
         GoOffline();
         _noNetwork = true;
@@ -9306,6 +9479,21 @@ public sealed class DshPet : Form {
     // Radar readouts for the live diagnostics: the four numbers plus the geometry, so
     // "the bracket looks wrong" can be traced to a number instead of a guess.
     public int ExprForTest { get { return _expr; } }
+    public bool NightOnForTest { get { return _nightOn; } }
+    public bool NightNowForTest { get { return _nightNow; } }
+    public void SetNightForTest(bool on) { _nightOn = on; }
+    public void SetNightHoursForTest(int inH, int outH) { _nightIn = ClampHour(inH); _nightOut = ClampHour(outH); }
+    public void ForceNightProbeNow() { _nightProbeAt = unchecked(Environment.TickCount - NightProbeMs - 1); }
+    // Drive the window from a FAKE current hour, so the wrap-past-midnight case can be
+    // asserted without waiting for the wall clock to get there.
+    void SetCurrentHourForTest(int hour) {
+        _nightNow = IsNightHour(ClampHour(hour), _nightIn, _nightOut);
+        _nightProbeAt = Environment.TickCount;         // fresh: the cache is authoritative
+    }
+    static string ExprName(int e) {
+        return e == EXPR_HAPPY ? "happy" : e == EXPR_NERVOUS ? "nervous"
+             : e == EXPR_ALOOF ? "worried" : e == EXPR_CALM ? "deadpan" : ("?" + e);
+    }
     public string ExprStateForTest() {
         StringBuilder sb = new StringBuilder();
         sb.Append("expr=").Append(_expr).Append(" (0=happy 1=nervous 2=aloof 3=calm)")

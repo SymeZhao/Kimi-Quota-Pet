@@ -33,3 +33,5 @@ desktop.ini
 
 # ---- local rollback copies of the main script (never shipped) ----
 kimi_pet.ps1.bak-*
+# ---- personal operations note (travels on the USB drive, never part of the product) ----
+硬盘更新流程.md

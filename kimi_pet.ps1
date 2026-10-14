@@ -998,6 +998,53 @@ public sealed class DshPet : Form {
             return Math.Round(v < 0 ? 0 : v, 2);
         }
     }
+    // ---- time since the last deduction ---------------------------------------
+    // The reset window is 5 minutes (author's spec). It is armed where a cue actually
+    // books money (_pendingStep is set), NOT where the debt is merely derived: a cue
+    // waits for an unclaimed bowl, and the countdown should follow the money leaving the
+    // balance, not the server's arithmetic.
+    //
+    // The remaining time is computed from a WALL CLOCK rather than the frame dt: the
+    // render loop stops repainting while she is idle (anim == false), so a dt
+    // accumulator would freeze whenever nothing else is happening.
+    const double SpendWindowSec = 300.0;     // 5 minutes, per the author
+    int _spendAtTick;                        // TickCount when the last deduction booked
+    bool _spendSeen;                         // false until the first deduction
+    bool _spendUnknown;                      // a deduction was missed while stale
+    string _countdownShown = "";             // last text pushed to the tablet
+
+    // Seconds left in the 5-minute window. Frozen at 0 once it has run out (the next
+    // deduction restarts it). Kept next to DrawnBalance so the panel and any diagnostic
+    // read the same source.
+    double SpendLeftSec {
+        get {
+            if (!_spendSeen) return 0;
+            double left = SpendWindowSec - unchecked(Environment.TickCount - _spendAtTick) / 1000.0;
+            return left < 0 ? 0 : left;
+        }
+    }
+
+    // Third tablet line: the countdown, or why it cannot be shown.
+    string CountdownText() {
+        if (_showStale) return "--";
+        if (_spendUnknown) return "--";
+        if (!_spendSeen) return "05:00";
+        double left = SpendLeftSec;
+        int total = (int)Math.Ceiling(left);     // 0:01 stays on screen until it hits 0
+        if (total < 0) total = 0;
+        return (total / 60).ToString("00") + ":" + (total % 60).ToString("00");
+    }
+
+    bool SpendCountdownUnknown { get { return _spendUnknown; } }
+    double SpendLeftForTest { get { return SpendLeftSec; } }
+    string CountdownTextForTest { get { return CountdownText(); } }
+    void MarkSpendNow() { _spendSeen = true; _spendUnknown = false; _spendAtTick = Environment.TickCount; }
+    void MarkSpendUnknownForTest() { _spendUnknown = true; }
+    void SetSpendAgeForTest(double seconds) {
+        _spendSeen = true; _spendUnknown = false;
+        _spendAtTick = unchecked(Environment.TickCount - (int)Math.Round(seconds * 1000.0));
+    }
+
     string _status = S_LOADING;
     volatile bool _connected;
     volatile string _lastPollResult = "";
@@ -1073,6 +1120,10 @@ public sealed class DshPet : Form {
     double _testBumpAmount;          // how much the rehearsal added (0 = none in play)
     double _testBumpFrom = double.NaN;  // the live balance it started from
     bool _inTestTopUp;               // set only around the TestTopUp() call
+    // Read by the tick loop when it books a cue: true when ApplyBalance() last saw a
+    // rehearsal being rolled back by a real poll, or an explicit "refresh now" resync.
+    bool _testRollbackSeen;
+    bool _snapSynced;
     // A rehearsal that a real poll has undone, whose bowl is still waiting to be
     // collected. The books are anchored on the true balance, but the bowl still pays
     // out the rehearsal amount, so the debt formula has to leave that amount out
@@ -4684,10 +4735,12 @@ public sealed class DshPet : Form {
     string BalanceText() {
         if (_showStale) return "--";                    // the reading broke: say so
         if (double.IsNaN(DrawnBalance)) return "--";
-        // Percentage mode reads better without decimals; CNY keeps its cents.
-        return _panelSuffix.Length > 0
-             ? DrawnBalance.ToString("0", CultureInfo.InvariantCulture)
-             : DrawnBalance.ToString("0.00", CultureInfo.InvariantCulture);
+        // Both modes carry two decimals: the plan ratio arrives as a two-decimal
+        // percentage and the author wants to see it (74.83 %, not 74 %). The tablet is
+        // narrow, so DigitSizeFor() shrinks the digits when they need the room, and
+        // --panelcheck measures the number INCLUDING the "%" suffix so an overflow is
+        // caught instead of spilling off the frame.
+        return DrawnBalance.ToString("0.00", CultureInfo.InvariantCulture);
     }
 
     // The font size the digits get: whatever fits in the room left after the currency
@@ -4695,9 +4748,19 @@ public sealed class DshPet : Form {
     // readability floor. Shared by the renderer and --panelcheck so the two cannot
     // disagree about what "fits" means.
     static float DigitSizeFor(Graphics g, float W, float H, string txt, float signWidth) {
+        return DigitSizeFor(g, W, H, txt, signWidth, 0f);
+    }
+
+    // BOTH decorations come out of the room: the currency sign and the trailing suffix
+    // ("%"). Leaving the suffix out sized the digits for a panel wider than the tablet,
+    // so in plan mode the "%" hung off the frame - invisible to the old --panelcheck
+    // because that never measured the suffix either.
+    static float DigitSizeFor(Graphics g, float W, float H, string txt, float signWidth, float suffixWidth) {
         float size = H * 0.48f;
-        float floorSize = H * 0.17f;
-        float room = W * (1 - 2 * PanelMargin) - signWidth;
+        // The floor keeps a huge number readable; 0.15 rather than 0.17 so the widest
+        // realistic readout still fits beside the suffix. Ordinary values never reach it.
+        float floorSize = H * 0.15f;
+        float room = W * (1 - 2 * PanelMargin) - signWidth - suffixWidth;
         if (room < 8f) room = 8f;
         SizeF sd;
         using (Font f = new Font("Arial", size, FontStyle.Bold, GraphicsUnit.Pixel))
@@ -4723,8 +4786,11 @@ public sealed class DshPet : Form {
         int pw, ph;
         PanelSize(out pw, out ph);
         float avail = pw * (1 - 2 * PanelMargin);
+        // The suffix is part of the readout, so it must be measured with the digits:
+        // the balance is two decimals now, and "100.00 %" is far wider than "100 %".
+        string suffix = _panelSuffix;
         Console.WriteLine("panel " + pw + "x" + ph + "px  margin " + (PanelMargin * 100).ToString("0") +
-                          "%  digits area " + avail.ToString("0") + "px");
+                          "%  digits area " + avail.ToString("0") + "px  suffix='" + suffix + "'");
         string[] tests = new string[] { "0.00", "9.99", "30.00", "99.99", "100.00",
                                         "999.99", "1000.00", "99999.99", "1234567.89", "--" };
         int over = 0;
@@ -4732,14 +4798,16 @@ public sealed class DshPet : Form {
         using (Graphics g = Graphics.FromImage(probe))
         using (Font fc = new Font("Microsoft YaHei UI", ph * 0.27f, FontStyle.Bold, GraphicsUnit.Pixel)) {
             SizeF sc = g.MeasureString("\u00A5", fc);
+            SizeF ssuf = g.MeasureString(suffix, fc);
             Console.WriteLine("  currency sign stays at " + (ph * 0.27f).ToString("0") +
-                              "px (width " + sc.Width.ToString("0") + "px)");
+                              "px (width " + sc.Width.ToString("0") + "px)  suffix width " +
+                              ssuf.Width.ToString("0") + "px");
             for (int i = 0; i < tests.Length; i++) {
-                float size = DigitSizeFor(g, pw, ph, tests[i], sc.Width);
+                float size = DigitSizeFor(g, pw, ph, tests[i], sc.Width, ssuf.Width);
                 SizeF sd;
                 using (Font f = new Font("Arial", size, FontStyle.Bold, GraphicsUnit.Pixel))
                     sd = g.MeasureString(tests[i], f);
-                float total = sd.Width + sc.Width;
+                float total = sd.Width + sc.Width + ssuf.Width;
                 bool fits = total <= avail + 0.5f;
                 if (!fits) over++;
                 Console.WriteLine("  " + tests[i].PadRight(11) +
@@ -4815,6 +4883,19 @@ public sealed class DshPet : Form {
                     g.DrawString(_panelLabel, f, b, lr, sf);
                 }
 
+                // Third line: time since the last deduction. The bottom third of the
+                // tablet screen was empty, and the label and the number keep the rows
+                // they always had, so nothing above this moves.
+                float fCd = H * 0.14f;
+                using (Font fcd = new Font("Arial", fCd, FontStyle.Bold, GraphicsUnit.Pixel))
+                using (Brush shd = new SolidBrush(Color.FromArgb(150, 0, 0, 0)))
+                using (Brush bcd = new SolidBrush(Color.FromArgb(230, 150, 172, 210))) {
+                    string cdt = CountdownText();
+                    RectangleF cr = new RectangleF(0, H * 0.83f, W, fCd * 1.5f);
+                    g.DrawString(cdt, fcd, shd, new RectangleF(cr.X + 1.5f, cr.Y + 1.5f, cr.Width, cr.Height), sf);
+                    g.DrawString(cdt, fcd, bcd, cr, sf);
+                }
+
                 float fCur = H * 0.27f;
                 using (Font fc = new Font("Microsoft YaHei UI", fCur, FontStyle.Bold, GraphicsUnit.Pixel))
                 using (Brush sh = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
@@ -4828,7 +4909,7 @@ public sealed class DshPet : Form {
                     // screen), so a longer number is drawn SMALLER instead of running
                     // off the tablet - "100.00" used to spill over the frame. The sign
                     // and the label keep their size, as asked.
-                    float fBal = DigitSizeFor(g, W, H, txt, sc.Width);
+                    float fBal = DigitSizeFor(g, W, H, txt, sc.Width, ssuf.Width);
                     SizeF sb, sbFull;
                     using (Font f0 = new Font("Arial", H * 0.48f, FontStyle.Bold, GraphicsUnit.Pixel))
                         sbFull = g.MeasureString(txt, f0);
@@ -4839,7 +4920,7 @@ public sealed class DshPet : Form {
                         float left = (W - total) / 2f;
                         // Keep the block's vertical CENTRE where it was: a smaller
                         // number would otherwise sit lower than the old one.
-                        float top = H * 0.44f + (sbFull.Height - sb.Height) * 0.5f;
+                        float top = H * 0.40f + (sbFull.Height - sb.Height) * 0.5f;
                         g.DrawString(_panelSym, fc, sh, left + 1.5f, top + sb.Height * 0.24f + 1.5f);
                         g.DrawString(txt, fb, sh, left + sc.Width + 1.5f, top + 1.5f);
                         g.DrawString(_panelSuffix, fc, sh, left + sc.Width + sb.Width + 1.5f,
@@ -5051,6 +5132,9 @@ public sealed class DshPet : Form {
             // While a bowl is out, nothing is deducted at all: an outstanding charge
             // waits until the bowl has been eaten. The debt keeps accumulating in
             // _pending - only the animation and the drop are held back.
+            // A genuine booking may arm the countdown; a rehearsal being rolled back or
+            // an explicit resync may not.
+            bool spendArms = !_testRollbackSeen && !_snapSynced;
             double take = 0;
             if (!_bowlPending() && _dueGap <= 0 && _pendingStep <= 0 && _cueGrace <= 0) {
                 if (_pending >= _step - 1e-9) take = _step;
@@ -5066,6 +5150,11 @@ public sealed class DshPet : Form {
                 _bookedBal = Math.Round(_bookedBal - take, 4);
                 _pendingStep = take;
                 _dueGap = CueGapSec;
+                if (spendArms) {
+                    MarkSpendNow();
+                    Log("spend booked: -" + take.ToString("0.00", CultureInfo.InvariantCulture) +
+                        " -> countdown restarted (" + SpendWindowSec.ToString("0") + "s)");
+                }
             }
 
             // The cue itself fires once the previous floater has finished rising:
@@ -5118,6 +5207,11 @@ public sealed class DshPet : Form {
             // Radar AFTER the mood: the lock only exists while she is aloof, and the
             // magnet moves the bowl, so it has to run after UpdateRice too.
             UpdateRadar(dt);
+
+            // The countdown changes once a second; only that change forces a repaint,
+            // so an idle pet still shows a live countdown without painting 30x a second.
+            string cd = CountdownText();
+            if (cd != _countdownShown) { _countdownShown = cd; _dirty = true; }
 
             if (anim || _dirty) { RenderToCanvas(); PushLayer(); }
         } catch (Exception ex) { Log("tick: " + ex); }
@@ -5655,6 +5749,9 @@ public sealed class DshPet : Form {
         if (_wasConnected) PlayWarnCue();
         _wasConnected = false;
         _showStale = true;
+        // Whatever happens while the reading is down cannot be timestamped later, so the
+        // countdown drops to "--" instead of guessing when the money went.
+        _spendUnknown = true;
         if (hint != null) _panelLabel = hint;
     }
 
@@ -5717,8 +5814,16 @@ public sealed class DshPet : Form {
             // recognised before any of the accounting below sees it.
             bool testRollback = !firstReading && !snap && _testBumpAmount > 0 &&
                                 bal < prevReal - 1e-6 && bal <= _testBumpFrom + 1e-6;
+            // Published for the tick loop, which books the cue a moment later.
+            _testRollbackSeen = testRollback;
+            _snapSynced = snap;
             _realBal = bal;
             bool topUp = false;
+            // Set by the debt block below when a drop cannot be explained as fresh debt:
+            // the reading had jumped down while it was stale, i.e. money was spent at an
+            // unknown moment. Declared out here because the rollback branch also reads it
+            // (a rehearsal being undone by a real poll is not spending).
+            bool recoveryDrop = false;
             if (firstReading) {
                 _bookedAt = bal;
                 _bookedBal = bal;
@@ -5735,6 +5840,14 @@ public sealed class DshPet : Form {
                 _pending = 0;
                 _pendingStep = 0;
                 _dueGap = 0;
+                // The books were re-anchored below the readout: that money vanished while
+                // nobody was watching, so the countdown says "--" rather than inventing a
+                // time. A rehearsal being undone is not spending, hence the testRollback
+                // guard.
+                if (recoveryDrop && !testRollback) {
+                    _spendUnknown = true;
+                    Log("spend while unread: countdown shows -- until the next deduction");
+                }
                 // "refresh now" also ends any rehearsal whose fake money has not been
                 // rolled back yet - the books are being re-synced to the server.
                 if (_testBumpAmount > 0) {
@@ -5875,6 +5988,9 @@ public sealed class DshPet : Form {
                         " dueGap=" + _dueGap.ToString("0.000") +
                         " rawOwed=" + owed.ToString("0.0000"));
                 }
+                // owed <= 0 means the reading JUMPED DOWN without a fresh debt behind
+                // it: money was spent at some unknown moment (the reading was stale).
+                recoveryDrop = owed <= -1e-9;
                 if (owed < -1e-9) {
                     // the server really is above (booked + uncollected): a recharge that
                     // was never noticed, or a correction. Re-anchor so the debt is only
@@ -6339,6 +6455,14 @@ public sealed class DshPet : Form {
         // Standalone: the night-mode resting face (fake windows, real state machine).
         if (Array.IndexOf(args, "--night") >= 0) {
             pet.RunNightTest();
+            Console.WriteLine("done");
+            Application.Exit();
+            return;
+        }
+
+        // Standalone: the time-since-last-deduction countdown.
+        if (Array.IndexOf(args, "--spend") >= 0) {
+            pet.RunSpendTest();
             Console.WriteLine("done");
             Application.Exit();
             return;
@@ -9287,6 +9411,89 @@ public sealed class DshPet : Form {
 
         _nightOn = on; _nightIn = iIn; _nightOut = iOut; _showStale = stale;
         if (!double.IsNaN(realBal)) ApplyBalancePublic(realBal, true);
+        ResetDemoForTest();
+    }
+
+    // Time-since-last-deduction countdown. The window rules are exercised through the
+    // same accessors the panel uses, and the "--" rules through the flags that the poll
+    // and the stale marker set.
+    public void RunSpendTest() {
+        GoOffline();
+        _noNetwork = true;
+        NoSaveForTest();
+        Console.WriteLine("spend countdown (offline)   window=" + SpendWindowSec.ToString("0") + "s");
+        bool seen = _spendSeen, unk = _spendUnknown, stale = _showStale;
+        int at = _spendAtTick;
+        bool ok = true;
+
+        _spendSeen = false; _spendUnknown = false; _showStale = false;
+        string init = CountdownText();
+        Console.WriteLine("  initial  : '" + init + "' (want 05:00) -> " + (init == "05:00" ? "OK" : "FAIL"));
+        ok = ok && init == "05:00";
+
+        MarkSpendNow();
+        string fresh = CountdownText();
+        Console.WriteLine("  on spend : '" + fresh + "' (want 05:00) -> " + (fresh == "05:00" ? "OK" : "FAIL"));
+        ok = ok && fresh == "05:00";
+
+        SetSpendAgeForTest(60);
+        string at1m = CountdownText();
+        bool left4m = Math.Abs(SpendLeftSec - 240.0) < 2.0;
+        Console.WriteLine("  after 1m : '" + at1m + "' want 04:00  left=" + SpendLeftSec.ToString("0") +
+                          "s -> " + ((at1m == "04:00" && left4m) ? "OK" : "FAIL"));
+        ok = ok && at1m == "04:00" && left4m;
+
+        SetSpendAgeForTest(299);
+        string at5m = CountdownText();
+        Console.WriteLine("  at 4:59  : '" + at5m + "' (want 00:01) -> " + (at5m == "00:01" ? "OK" : "FAIL"));
+        ok = ok && at5m == "00:01";
+
+        SetSpendAgeForTest(3600);
+        string done = CountdownText();
+        bool zero = SpendLeftSec == 0;
+        Console.WriteLine("  past 5m  : '" + done + "' left=" + SpendLeftSec.ToString("0") +
+                          "s (must sit at 00:00, not run negative) -> " +
+                          ((done == "00:00" && zero) ? "OK" : "FAIL"));
+        ok = ok && done == "00:00" && zero;
+
+        MarkSpendNow();
+        string again = CountdownText();
+        Console.WriteLine("  re-spend : '" + again + "' (window restarts) -> " + (again == "05:00" ? "OK" : "FAIL"));
+        ok = ok && again == "05:00";
+
+        // A deduction missed while the reading was down must not be given a fake time.
+        SetSpendAgeForTest(120);
+        _spendUnknown = true;
+        string missed = CountdownText();
+        Console.WriteLine("  missed   : '" + missed + "' (want --, no guessing) -> " + (missed == "--" ? "OK" : "FAIL"));
+        ok = ok && missed == "--";
+
+        _spendUnknown = false;
+        _showStale = true;
+        string staleTxt = CountdownText();
+        Console.WriteLine("  stale    : '" + staleTxt + "' (want --) -> " + (staleTxt == "--" ? "OK" : "FAIL"));
+        ok = ok && staleTxt == "--";
+        _showStale = false;
+
+        // A real drop must arm it through the poll path, not just through the test hook.
+        ApplyBalancePublic(50.00, true);
+        _spendSeen = false; _spendUnknown = false;
+        ApplyBalancePublic(49.99, false);
+        PumpTicks(40);
+        string polled = CountdownText();
+        bool armed = _spendSeen && !_spendUnknown;
+        // The window has only just restarted, so it reads 05:00 or 04:5x depending on how
+        // many frames the queue needed; what matters is that it is armed and counting down.
+        bool counting = polled.StartsWith("05:") || polled.StartsWith("04:");
+        Console.WriteLine("  by poll  : '-0.01' polled -> '" + polled + "' seen=" + armed +
+                          " counting=" + counting + " -> " + ((armed && counting) ? "OK" : "FAIL"));
+        ok = ok && armed && counting;
+
+        Console.WriteLine("  verdict: " + (ok
+            ? "OK - 5-minute window, stops at 00:00, restarts on the next real deduction, '--' when missed"
+            : "FAIL"));
+
+        _spendSeen = seen; _spendUnknown = unk; _showStale = stale; _spendAtTick = at;
         ResetDemoForTest();
     }
 

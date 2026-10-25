@@ -640,6 +640,12 @@ public sealed class DshPet : Form {
     const string S_CORNER_L= "\u5DE6\u4E0B\u89D2";                                  // bottom-left
     const string S_CORNER_R= "\u53F3\u4E0B\u89D2";                                  // bottom-right
     const string S_CORNER_F= "\u4E0D\u5438\u9644";                                  // no snapping
+    // Manual facing flip. It OVERLAYS the automatic corner facing instead of replacing
+    // it: the two are XOR'd, so turning this on always turns her round relative to where
+    // the corner would have put her, and crossing the centre line keeps working.
+    const string S_FLIP     = "\u7FFB\u8F6C\u7ACB\u7ED8";                        // flip artwork
+    const string S_FLIP_ON  = "\u4E0E\u89D2\u4F4D\u76F8\u53CD";                  // opposite to corner
+    const string S_FLIP_OFF = "\u8DDF\u968F\u89D2\u4F4D";                        // follow corner
     const string S_CUSTOM  = "\u81EA\u5B9A\u4E49...";                               // custom...
     const string S_HELPT   = "\u6F14\u793A\u6263\u8D39\u91D1\u989D";
     const string S_HELPP   = "\u8981\u6F14\u793A\u6263\u591A\u5C11\u94B1\uFF08\u5143\uFF09";
@@ -722,6 +728,28 @@ public sealed class DshPet : Form {
     // picked no-snapping in the menu. "free" is deliberately NOT persisted: the next
     // start re-docks to the corner state.ini remembers.
     string _corner = "right";
+    // Mirror state. She is drawn MIRRORED when docked in the RIGHT corner: the artwork
+    // sits flush against its LEFT and BOTTOM edges (measured: the left column carries
+    // ~330 opaque pixels and the bottom row ~1000, while the right column is nearly
+    // empty), so in the left corner those cut edges coincide with the screen edges and
+    // look natural, while in the right corner the flush left edge leaves a visible gap
+    // against the right screen edge.
+    //
+    // Driven by the CORNER SETTING, not by where she happens to be: the "free" position
+    // is draggable but never mirrors, and a docked corner mirrors regardless of what the
+    // user is doing mid-drag. That is why SyncSideToPosition()-style "which half is she
+    // in" logic is NOT used here - geometry never changes during a drag.
+    // Set by SyncMirror() from the corner setting. Until the drawing paths learn to
+    // mirror (added in the following step) this stays false, so moving the geometry
+    // code around cannot change a single pixel.
+    bool _mirror;                    // the facing actually drawn (auto XOR manual)
+    // Manual overlay on top of the automatic corner facing. Kept as a separate flag so
+    // the automatic part stays live: the two are combined with XOR, which means dragging
+    // across the centre line still works while a manual flip is on.
+    bool _flipExtra;                 // state.ini flip=on|off
+    // The sprite space the tablet quad is authored in (sprite.png is 1024x1024). The
+    // mirror is (SourceW - x) in THAT space, not (_w - x) in widget pixels.
+    const int SpriteSourceW = 1024;
     // ---- night mode (resting face only) ----------------------------------
     // Asked for by the author: from 23:00 until 06:00, local machine time, the resting
     // face is the worried one. It replaces ONLY the resting face - a charge cue, a
@@ -1045,6 +1073,21 @@ public sealed class DshPet : Form {
         _spendAtTick = unchecked(Environment.TickCount - (int)Math.Round(seconds * 1000.0));
     }
 
+    // ---- mirror accessors (read-only views for the --corners diagnostic) ----
+    bool MirrorForTest { get { return _mirror; } }
+    bool FlipExtraForTest { get { return _flipExtra; } }
+    bool CornerFacingForTest { get { return CornerFacing; } }
+    void SetFlipExtraForTest(bool on) { _flipExtra = on; UpdateMirrorGeometry(); }
+    double QuadXForTest(int i) { return (i >= 0 && i < 4) ? _fx[i] : double.NaN; }
+    double QuadYForTest(int i) { return (i >= 0 && i < 4) ? _fy[i] : double.NaN; }
+    int HeadXForTest { get { return _headX; } }
+    // Rebuild the corner geometry and a layout, exactly the way a menu switch does, so a
+    // diagnostic can compare left against right without going through the menu.
+    void ApplyCornerForTest(string mode) {
+        _corner = mode;
+        UpdateMirrorGeometry();
+    }
+
     string _status = S_LOADING;
     volatile bool _connected;
     volatile string _lastPollResult = "";
@@ -1224,6 +1267,7 @@ public sealed class DshPet : Form {
     ToolStripMenuItem _soundItem;
     ToolStripMenuItem _muteItem;
     ToolStripMenuItem _cornerItem;      // the position submenu (left / right / free)
+    ToolStripMenuItem _flipItem;        // the manual facing flip (ticked = flipped)
     ToolStripMenuItem _themeItem;
     ToolStripMenuItem _testTopItem = null;   // the top-up submenu is gone; kept for --menushot guards
     bool _darkTheme = false;         // menu palette: light (shipped) or dark (DSH-like)
@@ -1615,6 +1659,12 @@ public sealed class DshPet : Form {
         ToolStripMenuItem crFree = NewItem(IC_NONE, S_CORNER_F);
         crFree.Click += delegate { SetCorner("free", true); };
         _cornerItem.DropDownItems.Add(crFree);
+        // The manual facing flip lives in the same submenu: it is about which way she
+        // stands, which is the same question the corner answers.
+        _cornerItem.DropDownItems.Add(new ToolStripSeparator());
+        _flipItem = NewItem(IC_NONE, S_FLIP);
+        _flipItem.Click += delegate { SetFlipExtra(!_flipExtra, true); };
+        _cornerItem.DropDownItems.Add(_flipItem);
         _menu.Items.Add(_cornerItem);
 
 
@@ -1829,6 +1879,9 @@ public sealed class DshPet : Form {
                 if (mi != null) mi.Checked = (_corner == want[i]);
             }
         }
+        // The flip row shows its own state, not the resulting facing: with the overlay
+        // model those differ whenever the corner already mirrors her.
+        if (_flipItem != null) _flipItem.Checked = _flipExtra;
         // Menu palette: the current one carries the tick, like the size presets.
         if (_themeItem != null) {
             if (_themeItem.DropDownItems.Count >= 2) {
@@ -1854,9 +1907,27 @@ public sealed class DshPet : Form {
     // Menu action for the position submenu. "left"/"right" dock immediately and are
     // written to state.ini; "free" only lives for this run (persist=false at the call
     // site), so a restart comes back docked - which is what was asked for.
+    // Menu action for the manual facing flip. An OVERLAY on the corner facing (XOR), so
+    // it never fights the automatic behaviour. Persisted, because a facing the user chose
+    // should survive a restart.
+    void SetFlipExtra(bool on, bool persist) {
+        if (_flipExtra == on) return;
+        _flipExtra = on;
+        UpdateMirrorGeometry();          // cheap path: no Relayout
+        RefreshMenuChecks();
+        if (persist) SaveState();
+        Log("flip: manual=" + _flipExtra + "  cornerFacing=" + CornerFacing +
+            "  resulting mirror=" + _mirror);
+    }
+
     void SetCorner(string mode, bool persist) {
         if (mode != "left" && mode != "right" && mode != "free") return;
         _corner = mode;
+        // The mirror follows the corner, so the geometry that hangs off it (tablet quad,
+        // head anchor, hit map) has to be rebuilt here. This is the CHEAP path
+        // (UpdateMirrorGeometry), not Relayout(): the widget size and every bitmap are
+        // unchanged, so there is nothing to re-sample or rebuild.
+        UpdateMirrorGeometry();
         if (mode == "left" || mode == "right") {
             SnapToCorner(true);                   // dock right now, no fly-across
             _dirty = true;
@@ -1865,7 +1936,8 @@ public sealed class DshPet : Form {
         }
         if (persist) SaveState();
         Log("position: " + _corner + "  (dragging: " +
-            (_corner == "free" ? "stays where it is put" : "flies back to the " + _corner + " corner") + ")");
+            (_corner == "free" ? "stays where it is put" : "flies back to the " + _corner + " corner") +
+            ", mirrored: " + _mirror + ")");
     }
 
 
@@ -2712,6 +2784,94 @@ public sealed class DshPet : Form {
         }
     }
 
+    // Everything that depends on WHICH CORNER she is in, and nothing else.
+    //
+    // Relayout() cannot be used when only the corner changes: it re-resamples the sprite,
+    // disposes and rebuilds the whole screen-sized canvas bitmap and rebuilds the bowl
+    // art - 90 to 150 ms of work that a mirror flip does not need, because the widget
+    // size and every bitmap are unchanged. Flipping through that path is what made the
+    // reference implementation drop frames.
+    //
+    // So this recomputes only the four cheap things that actually move with the mirror:
+    // the tablet quad, the head anchor, the floater step, and the caches keyed on them.
+    // The mirror itself is NOT baked into any bitmap - the drawing path applies it as a
+    // transform - so there is nothing to regenerate here.
+    // The one place _mirror is decided.
+    //
+    // "free" never mirrors, whatever the position: that mode is draggable but stays put on
+    // release, so there is no corner for a facing to belong to. Every other mode mirrors
+    // according to the corner she is DOCKED to - and while dragging, that corner follows
+    // the pointer (SyncSideToPosition), so the flip happens mid-drag exactly like the
+    // reference implementation does it.
+    //
+    // The manual switch OVERLAYS this rather than overriding it: XOR, so "flip" always
+    // means "the other way round than the corner would put me", and the automatic corner
+    // facing keeps working underneath. In "free" the automatic side is false, so the
+    // manual switch simply becomes the facing.
+    void SyncMirror() {
+        bool byCorner = (_corner == "right");
+        _mirror = byCorner ^ _flipExtra;
+    }
+
+    // The automatic half on its own, without the manual overlay. Used by the menu ticks
+    // and the diagnostics so they can tell the two apart.
+    bool CornerFacing { get { return _corner == "right"; } }
+
+    void UpdateMirrorGeometry() {
+        if (_flat == null) return;
+        SyncMirror();
+        int sw = Math.Max(2, (int)Math.Round(_flat.Width * _scale));
+        int sh = Math.Max(2, (int)Math.Round(_flat.Height * _scale));
+
+        // tablet screen quad in sprite pixels, from make_sprite.ps1 (min-area
+        // rotated rectangle around the opaque black screen).
+        // Current art: blue-haired maid, re-measured 2026-09-28. The panel moved
+        // and grew versus the old artwork, so these MUST be refreshed whenever
+        // sprite.png is rebuilt - otherwise the readout lands off the tablet.
+        // ORDER MATTERS: index 0..3 must be TL, TR, BR, BL as seen on screen.
+        // Caliper's own TL/TR/BR/BL labels follow its rotated frame and can come
+        // out swapped when the panel is tilted the other way, which renders the
+        // text upside down. Re-check the order by rendering --selftest.
+        // Kimi artwork: the tablet is DRAWN into sprite.png by
+        // tools/kimi_make_assets.py, so these are that rectangle's corners.
+        // Order 0..3 = TL, TR, BR, BL. To move the panel, edit PX/PY in the asset
+        // script, re-run it, and paste the new numbers from panel_quad.txt here.
+        // Kimi artwork (bust framing, both hands holding the tablet). Measured from the
+        // generated 2x2 sheet (tools/kimi_grid_check2.py: the four panels agree to 1 px),
+        // then scaled with the sprite from 1720 to 1024 - the same canvas size the
+        // reference pet uses.
+        double[] qx = new double[] { 382, 707, 719, 394 };
+        double[] qy = new double[] { 663, 643, 841, 860 };
+        // Widget-relative coordinates. _offX/_offY are added when drawing, so these
+        // stay the same whether the window is widget-sized or screen-sized.
+        //
+        // Under the mirror the X coordinate is reflected in SPRITE space (SourceW - x),
+        // because qx was measured against the 1024 px artwork. Reflecting in widget
+        // pixels (_w - x) would be wrong the moment the sprite is scaled, and the vertex
+        // ORDER is deliberately preserved: DrawScreen picks the corners by role, so the
+        // two top vertices simply swap places on screen.
+        _fx = new double[4]; _fy = new double[4];
+        for (int i = 0; i < 4; i++) {
+            double x = _mirror ? ((double)SpriteSourceW - qx[i]) : qx[i];
+            _fx[i] = x * _scale; _fy[i] = qy[i] * _scale;
+        }
+
+        // Her head anchor, which hearts and floating numbers spawn from.
+        _headX = (int)(sw * 0.51);
+        _headY = (int)(sh * 0.33);
+        if (_mirror) _headX = _w - _headX;
+        // one text line high, so a fast run of numbers cascades without overlapping
+        _floaterStep = (float)Math.Max(18.0, 34.0 * _scale * 1.7);
+
+        // The panel is keyed on the quad and the head anchor moved, so caches that were
+        // built for the old corner no longer describe this frame.
+        _hitMap = null;
+        _charHitMap = null;
+        _girlStamped = false;
+        _forceFullFill = true;
+        _dirty = true;
+    }
+
     void Relayout() {
         // Physical size has to come from the real monitor DPI. If the process
         // could not be made DPI aware, Windows lies and reports 96, which would
@@ -2759,34 +2919,7 @@ public sealed class DshPet : Form {
         // window covers the screen and the widget is blitted in at _offX/_offY.
         _canvas = new Bitmap(_winW, _winH, PixelFormat.Format32bppArgb);
 
-        // tablet screen quad in sprite pixels, from make_sprite.ps1 (min-area
-        // rotated rectangle around the opaque black screen).
-        // Current art: blue-haired maid, re-measured 2026-09-28. The panel moved
-        // and grew versus the old artwork, so these MUST be refreshed whenever
-        // sprite.png is rebuilt - otherwise the readout lands off the tablet.
-        // ORDER MATTERS: index 0..3 must be TL, TR, BR, BL as seen on screen.
-        // Caliper's own TL/TR/BR/BL labels follow its rotated frame and can come
-        // out swapped when the panel is tilted the other way, which renders the
-        // text upside down. Re-check the order by rendering --selftest.
-        // Kimi artwork: the tablet is DRAWN into sprite.png by
-        // tools/kimi_make_assets.py, so these are that rectangle's corners.
-        // Order 0..3 = TL, TR, BR, BL. To move the panel, edit PX/PY in the asset
-        // script, re-run it, and paste the new numbers from panel_quad.txt here.
-        // Kimi artwork (bust framing, both hands holding the tablet). Measured from the
-        // generated 2x2 sheet (tools/kimi_grid_check2.py: the four panels agree to 1 px),
-        // then scaled with the sprite from 1720 to 1024 - the same canvas size the
-        // reference pet uses.
-        double[] qx = new double[] { 382, 707, 719, 394 };
-        double[] qy = new double[] { 663, 643, 841, 860 };
-        // Widget-relative coordinates. _offX/_offY are added when drawing, so these
-        // stay the same whether the window is widget-sized or screen-sized.
-        _fx = new double[4]; _fy = new double[4];
-        for (int i = 0; i < 4; i++) { _fx[i] = qx[i] * _scale; _fy[i] = qy[i] * _scale; }
-
-        _headX = (int)(sw * 0.51);
-        _headY = (int)(sh * 0.33);
-        // one text line high, so a fast run of numbers cascades without overlapping
-        _floaterStep = (float)Math.Max(18.0, 34.0 * _scale * 1.7);
+        UpdateMirrorGeometry();
 
         // The bowl is sized against the widget, and follows it when the size
         // preset changes. 0.44 of the edge, clamped so it stays draggable even at
@@ -3880,6 +4013,9 @@ public sealed class DshPet : Form {
                 // left|right dock; anything else (including a hand-edited value) falls
                 // back to the shipped default: bottom-right.
                 if (k == "corner") _corner = (v.ToLowerInvariant() == "left") ? "left" : "right";
+                // The manual facing overlay. Absent means "off", so an older state.ini
+                // simply keeps the automatic behaviour.
+                if (k == "flip") _flipExtra = (v.ToLowerInvariant() == "on" || v == "1");
                 // Night mode: "night" is the switch, the hours are optional and fall
                 // back to the shipped 23 -> 6, so a hand-edited file stays valid.
                 if (k == "night") _nightOn = (v.ToLowerInvariant() != "off" && v != "0");
@@ -3926,6 +4062,7 @@ public sealed class DshPet : Form {
                 // The runtime-only "free" corner is never written: state.ini keeps
                 // whichever docked corner the user last chose.
                 (_corner == "free" ? "" : "corner=" + _corner + "\r\n") +
+                (_flipExtra ? "flip=on\r\n" : "flip=off\r\n") +
                 "night=" + (_nightOn ? "on" : "off") + "\r\n" +
                 "nightIn=" + _nightIn.ToString(CultureInfo.InvariantCulture) + "\r\n" +
                 "nightOut=" + _nightOut.ToString(CultureInfo.InvariantCulture) + "\r\n" +
@@ -4198,6 +4335,39 @@ public sealed class DshPet : Form {
         base.OnMouseDown(e);
     }
 
+    // Which half of the primary monitor is her CENTRE in? The centre, not her left edge,
+    // so the answer matches what the user sees. Measured in working-area coordinates -
+    // the same space SnapToCorner targets.
+    bool InRightHalf() {
+        Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+        Rectangle vs = SystemInformation.VirtualScreen;
+        int centreOnScreen = (_offX + _w / 2) - (wa.Left - vs.Left);
+        return centreOnScreen > wa.Width / 2;
+    }
+
+    // Switch corners if her half changed, and recompute what hangs off that.
+    //
+    // Called from BOTH the drag and the release. Doing it only on release made the flip
+    // happen in one frame as she landed, which reads as a glitch rather than as her
+    // turning around - so the flip follows the pointer across the centre line instead.
+    //
+    // It only touches geometry (UpdateMirrorGeometry), never Relayout(): a mirror moves no
+    // bitmap, and Relayout re-samples the sprite and rebuilds the screen-sized canvas
+    // (90-150 ms) which is what made a mid-drag flip drop frames in the reference
+    // implementation.
+    //
+    // Returns true when the side changed. Does nothing in "free": that mode must never
+    // flip and must never take a corner.
+    bool SyncSideToPosition() {
+        if (_corner == "free") return false;
+        string want = InRightHalf() ? "right" : "left";
+        if (want == _corner) return false;
+        _corner = want;
+        UpdateMirrorGeometry();
+        Log("position: crossing to " + _corner + " (mid-drag), mirrored=" + _mirror);
+        return true;
+    }
+
     protected override void OnMouseMove(MouseEventArgs e) {
         if (_riceGrab != null && _riceGrab.Dragging && !_riceGrab.Fed) {
             Point sp = Cursor.Position;                 // screen pixels
@@ -4226,6 +4396,9 @@ public sealed class DshPet : Form {
             if (_offX > vs2.Width - _w) _offX = vs2.Width - _w;
             if (_offY < 0) _offY = 0;
             if (_offY > vs2.Height - _h) _offY = vs2.Height - _h;
+            // She turns as she crosses the centre line. Only geometry moves - see
+            // SyncSideToPosition - so this is safe to run at pointer rate.
+            SyncSideToPosition();
             _dirty = true;              // painted by the next animation tick, not here
         }
         base.OnMouseMove(e);
@@ -4236,6 +4409,16 @@ public sealed class DshPet : Form {
             ReleaseBowl();
         } else if (_drag) {
             _drag = false;
+            // Release decides the docking corner: whichever half she was let go in becomes
+            // _corner, so the facing she shows is the one she flies home to. In no-snap
+            // mode SyncSideToPosition() is a no-op, so nothing is taken and she just stays
+            // where she was put.
+            SyncSideToPosition();
+            // Persist the corner she was let go in. SaveState is a no-op in a diagnostic
+            // run, and "free" never reaches here with a changed corner (SyncSideToPosition
+            // bails out in that mode), so this cannot invent a corner the user did not ask
+            // for.
+            if (_corner == "left" || _corner == "right") SaveState();
             // Release -> fly back to the docked corner; in no-snap mode she stays put.
             ClampWidgetToScreen();
             SnapToCorner(false);
@@ -4415,6 +4598,14 @@ public sealed class DshPet : Form {
                             gt.InterpolationMode = InterpolationMode.HighQualityBicubic;
                             gt.PixelOffsetMode = PixelOffsetMode.HighQuality;
                             gt.CompositingMode = CompositingMode.SourceCopy;
+                            if (_mirror) {
+                                // The squash transform is applied about a canvas ROW, so the
+                                // mirror can simply be composed on top of it: flip about the
+                                // sprite's own vertical centre line, then the squash about
+                                // the same anchor row the unmirrored path uses.
+                                gt.TranslateTransform(tmp.Width, 0f);
+                                gt.ScaleTransform(-1f, 1f);
+                            }
                             gt.TranslateTransform(0f, (float)(anchor - dy));
                             gt.ScaleTransform(1f, (float)scaleY);
                             gt.TranslateTransform(0f, (float)(dy - anchor));
@@ -4436,7 +4627,7 @@ public sealed class DshPet : Form {
                         BlitLayer(tmp, buf, dx, dy, 1.0);
                     }
                 } else {
-                    BlitLayer(_sprNormal, buf, ox + _offX, oy + _offY, 1.0);
+                    BlitLayer(_sprNormal, buf, ox + _offX, oy + _offY, 1.0, _mirror);
                     for (int i = 0; i < _hits.Count; i++) {
                         double pulse = _hits[i].Pulse;
                         if (pulse > 0.01) {
@@ -4444,8 +4635,10 @@ public sealed class DshPet : Form {
                             // 113px sprite is a readable flash, 60% of a 454px one would
                             // just be a red silhouette.
                             double maxTint = Math.Max(0.30, 0.64 - _scale * 0.75);
+                            // Mirrored the same way as the sprite itself, so the red
+                            // silhouette and the character cannot face different ways.
                             BlitLayer(_sprRed, buf, ox + _offX, oy + _offY,
-                                      Math.Min(maxTint, maxTint * pulse));
+                                      Math.Min(maxTint, maxTint * pulse), _mirror);
                         }
                     }
                 }
@@ -4660,12 +4853,25 @@ public sealed class DshPet : Form {
     // coordinates of the layer's top-left, and the rect is subtracted on the way in
     // so a rect-locked buffer can be written without touching its neighbours.
     void BlitLayer(Bitmap layer, Buf dst, int ox, int oy, double alpha) {
+        BlitLayer(layer, dst, ox, oy, alpha, false);
+    }
+
+    // mirror=true flips the source horizontally WHILE BLITTING, by reading the source
+    // column (w-1-x) instead of x. Deliberately not a flipped copy of the bitmap: that
+    // would need a full resample per corner switch, and the note below explains why the
+    // scaled variants are avoided here.
+    //
+    // ox is still the DESTINATION left edge: the mirrored image occupies exactly the same
+    // rectangle on screen, it is just read back to front. Both the normal sprite and the
+    // red hurt overlay go through this, so they cannot disagree about which way she faces.
+    void BlitLayer(Bitmap layer, Buf dst, int ox, int oy, double alpha, bool mirror) {
         if (layer == null) return;
         Buf src = new Buf(layer);
         try {
             byte[] sp = src.P, dp = dst.P;
             int ss = src.Stride, ds = dst.Stride;
             int rx = dst.R.X, ry = dst.R.Y;
+            int swm1 = src.W - 1;
             for (int y = 0; y < src.H; y++) {
                 int ty = y + oy - ry;
                 if (ty < 0 || ty >= dst.H) continue;
@@ -4673,7 +4879,7 @@ public sealed class DshPet : Form {
                 for (int x = 0; x < src.W; x++) {
                     int tx = x + ox - rx;
                     if (tx < 0 || tx >= dst.W) continue;
-                    int si = srow + x * 4;
+                    int si = srow + (mirror ? (swm1 - x) : x) * 4;
                     int sa = sp[si + 3];
                     if (sa == 0) continue;
                     Cs.Blend(dp, drow + tx * 4, sp[si + 2], sp[si + 1], sp[si], sa / 255.0 * alpha);
@@ -4980,6 +5186,32 @@ public sealed class DshPet : Form {
         }
     }
 
+    // Pick the three quad vertices GDI+ needs for the panel parallelogram: TOP-LEFT,
+    // TOP-RIGHT and BOTTOM-LEFT as they appear ON SCREEN.
+    //
+    // They are chosen by ROLE (corner index 0..3 is authored as TL/TR/BR/BL) instead of
+    // by the raw _fx[] coordinates, because under the mirror a coordinate lands on the
+    // opposite side of the screen: the point authored as TOP-RIGHT is the one on the
+    // screen's left. Handing DrawImage the three corners in the wrong rotational order
+    // draws the panel MIRRORED, i.e. every digit and label reads backwards - which is
+    // exactly the trap this indirection exists to avoid.
+    //
+    //   not mirrored: TL=0  TR=1  BL=3
+    //   mirrored    : TL=1  TR=0  BL=2      (derived from the real quad numbers)
+    void PanelQuadIndices(out int iA, out int iB, out int iC) {
+        if (_mirror) { iA = 1; iB = 0; iC = 2; }
+        else { iA = 0; iB = 1; iC = 3; }
+    }
+
+    // Sign of (p1-p0) x (p2-p0) for the three points DrawScreen hands to GDI+. A bitmap
+    // is drawn MIRRORED when this winding flips, so comparing the sign between the two
+    // corners is how --corners proves the digits cannot end up backwards.
+    double PanelWindingSign() {
+        int a, b, c;
+        PanelQuadIndices(out a, out b, out c);
+        return Math.Sign((_fx[b] - _fx[a]) * (_fy[c] - _fy[a]) - (_fy[b] - _fy[a]) * (_fx[c] - _fx[a]));
+    }
+
     void DrawScreen() {
         int pw, ph;
         PanelSize(out pw, out ph);
@@ -4991,11 +5223,13 @@ public sealed class DshPet : Form {
                 g.SmoothingMode = SmoothingMode.HighQuality;
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                int iA, iB, iC;
+                PanelQuadIndices(out iA, out iB, out iC);
                 PointF[] dest = new PointF[3];
                 float bx = (float)(_offX + _shakeX), by = (float)(_offY + _shakeY);
-                dest[0] = new PointF((float)_fx[0] + bx, (float)_fy[0] + by);
-                dest[1] = new PointF((float)_fx[1] + bx, (float)_fy[1] + by);
-                dest[2] = new PointF((float)_fx[3] + bx, (float)_fy[3] + by);
+                dest[0] = new PointF((float)_fx[iA] + bx, (float)_fy[iA] + by);
+                dest[1] = new PointF((float)_fx[iB] + bx, (float)_fy[iB] + by);
+                dest[2] = new PointF((float)_fx[iC] + bx, (float)_fy[iC] + by);
                 g.DrawImage(panel, dest);
             }
         } finally { panel.Dispose(); }
@@ -5008,8 +5242,13 @@ public sealed class DshPet : Form {
         using (Graphics g = Graphics.FromImage(_canvas)) {
             g.SmoothingMode = SmoothingMode.AntiAlias;
             float r = Math.Max(2.5f, (float)(_h * 0.032));
-            float cx = (float)(_fx[1] + _fx[2]) / 2f + (float)_shakeX + _offX;
-            float cy = (float)(_fy[1] + _fy[2]) / 2f + (float)(_h * 0.05) + (float)_shakeY + _offY;
+            // The dot sits above the panel's top edge. Under the mirror the two TOP
+            // vertices live at different indices, so they are taken from the same
+            // role-based mapping the panel itself uses instead of reading indices 1 and 2.
+            int iTl, iTr, iBl;
+            PanelQuadIndices(out iTl, out iTr, out iBl);
+            float cx = (float)(_fx[iTl] + _fx[iTr]) / 2f + (float)_shakeX + _offX;
+            float cy = (float)(_fy[iTl] + _fy[iTr]) / 2f + (float)(_h * 0.05) + (float)_shakeY + _offY;
             using (Brush b = new SolidBrush(Color.FromArgb(235, 228, 62, 52)))
                 g.FillEllipse(b, cx - r, cy - r, r * 2, r * 2);
             using (Pen p = new Pen(Color.FromArgb(210, 255, 255, 255), Math.Max(1f, r * 0.3f)))
@@ -7083,6 +7322,138 @@ public sealed class DshPet : Form {
         bool notSaved = wouldSave == "left" || wouldSave == "right";
         Console.WriteLine("  would save corner=" + wouldSave + " (must be left|right, never free)");
         ok = ok && notSaved;
+
+        // ---- mirror geometry: right corner mirrors, left and free do not ----
+        // The quad is measured in SPRITE space (1024 across), so under the mirror every
+        // X becomes (1024 - x) and the four points come out reflected as a set. Checking
+        // the SET (sorted) rather than index-by-index is deliberate: the indices keep
+        // their authored meaning (TL/TR/BR/BL), so after the mirror the point that was
+        // top-right is the one on the screen's left - the SET is what must stay the same
+        // mirrored image of itself, and that is exactly what DrawScreen relies on.
+        // Through the REAL menu path, not a shortcut: SetCorner() is what must rebuild
+        // the geometry, and testing via a helper that calls UpdateMirrorGeometry()
+        // directly would not notice if that call went missing (it did, once).
+        SetCorner("left", false);
+        bool mirrorL = MirrorForTest;
+        int headL = HeadXForTest;
+        double[] qL = new double[4];
+        for (int i = 0; i < 4; i++) qL[i] = QuadXForTest(i) / _scale;   // back to sprite px
+        SetCorner("right", false);
+        bool mirrorR = MirrorForTest;
+        int headR = HeadXForTest;
+        double[] qR = new double[4];
+        for (int i = 0; i < 4; i++) qR[i] = QuadXForTest(i) / _scale;
+        SetCorner("free", false);
+        bool mirrorF = MirrorForTest;
+
+        bool quadMirrored = true;
+        for (int i = 0; i < 4; i++) {
+            // the left set reflected about SourceW/2 must equal the right set
+            bool found = false;
+            for (int j = 0; j < 4; j++)
+                if (Math.Abs((SpriteSourceW - qL[i]) - qR[j]) <= 1.0) { found = true; break; }
+            if (!found) quadMirrored = false;
+        }
+        bool headMirrored = Math.Abs((headL + headR) - _w) <= 2;
+        bool mirrorFlags = !mirrorL && mirrorR && !mirrorF;
+        Console.WriteLine("  mirror   : left=" + mirrorL + " right=" + mirrorR + " free=" + mirrorF +
+                          " (want False/True/False) -> " + (mirrorFlags ? "OK" : "FAIL"));
+        Console.WriteLine("  head     : left=" + headL + " right=" + headR + " sum=" + (headL + headR) +
+                          " want~" + _w + " -> " + (headMirrored ? "OK" : "FAIL"));
+        Console.WriteLine("  quad     : reflected set matches -> " + (quadMirrored ? "OK" : "FAIL"));
+        ok = ok && mirrorFlags && headMirrored && quadMirrored;
+
+        // ---- the panel must not be drawn MIRRORED (that is what would flip the text) ----
+        // GDI+ mirrors a bitmap when the three destination points it is given run the
+        // OTHER WAY round, which is entirely down to the sign of the cross product
+        // (p1-p0) x (p2-p0). The panel is an image, so the winding is the one and only
+        // thing that decides whether the digits read forwards. Assert it is the SAME sign
+        // in both corners: the mirror reflects the quad, but the role-based index swap in
+        // PanelQuadIndices() puts the winding back, and the panel bitmap itself is never
+        // flipped.
+        SetCorner("left", false);
+        double wL = PanelWindingSign();
+        SetCorner("right", false);
+        double wR = PanelWindingSign();
+        bool windingOk = (wL != 0) && (wL == wR);
+        Console.WriteLine("  winding  : left=" + wL + " right=" + wR +
+                          " (must be equal and non-zero, else the digits flip) -> " +
+                          (windingOk ? "OK" : "FAIL"));
+        ok = ok && windingOk;
+
+        // ---- the facing follows the POINTER, and the release decides the corner ----
+        // She is docked left, then dragged so her centre lands right of the monitor's
+        // middle. Two things must happen: the mirror turns on DURING the drag (judged on
+        // her centre, not an edge), and the new corner sticks.
+        SetCorner("left", false);
+        Rectangle waT = Screen.PrimaryScreen.WorkingArea;
+        Rectangle vsT = SystemInformation.VirtualScreen;
+        int midT = (waT.Left - vsT.Left) + waT.Width / 2;
+        _offX = Math.Max(0, midT - _w / 2 + 40);      // centre just right of the middle
+        bool crossedFlip = SyncSideToPosition() && _corner == "right" && _mirror;
+        Console.WriteLine("  cross    : centre>mid -> corner=" + _corner + " mirror=" + _mirror +
+                          " -> " + (crossedFlip ? "OK" : "FAIL"));
+        ok = ok && crossedFlip;
+
+        // ...and back to the left half, which must flip her back
+        _offX = Math.Max(0, midT - _w / 2 - 40);
+        bool crossedBack = SyncSideToPosition() && _corner == "left" && !_mirror;
+        Console.WriteLine("  crossback: centre<mid -> corner=" + _corner + " mirror=" + _mirror +
+                          " -> " + (crossedBack ? "OK" : "FAIL"));
+        ok = ok && crossedBack;
+
+        // "free" must never take a corner and never flip, wherever she is dragged
+        SetCorner("free", false);
+        _offX = Math.Max(0, midT - _w / 2 + 40);
+        bool freeNoCorner = !SyncSideToPosition() && _corner == "free" && !_mirror;
+        Console.WriteLine("  freecross: stayed=" + _corner + " mirror=" + _mirror +
+                          " -> " + (freeNoCorner ? "OK" : "FAIL"));
+        ok = ok && freeNoCorner;
+
+        // ---- the manual flip is an OVERLAY (XOR), not an override ----
+        // It has to satisfy three things at once: it turns her round relative to whatever
+        // the corner says, it does NOT get switched off by dragging across the centre
+        // line, and in "free" (where the automatic side is always false) it simply becomes
+        // the facing. Code that assigned _mirror directly would pass the first of those
+        // and fail the other two.
+        SetFlipExtraForTest(false);
+        SetCorner("left", false);
+        bool ovBase = !_mirror;                                   // left  + off -> not mirrored
+        SetFlipExtraForTest(true);
+        bool ovOn = _mirror && !CornerFacing;                     // left  + on  -> mirrored
+        SetCorner("right", false);                                // corner mirrors too now
+        bool ovXor = !_mirror && CornerFacing && _flipExtra;      // right + on  -> NOT mirrored
+        SetFlipExtraForTest(false);
+        bool ovOff = _mirror && CornerFacing;                     // right + off -> mirrored
+        Console.WriteLine("  flip ovl : L+off=" + ovBase + " L+on=" + ovOn +
+                          " R+on=" + ovXor + " R+off=" + ovOff +
+                          " -> " + ((ovBase && ovOn && ovXor && ovOff) ? "OK" : "FAIL"));
+        ok = ok && ovBase && ovOn && ovXor && ovOff;
+
+        // the manual layer must survive a drag across the centre line
+        SetFlipExtraForTest(true);
+        SetCorner("left", false);
+        bool flipBeforeCross = _mirror;                           // left + on -> mirrored
+        _offX = Math.Max(0, midT - _w / 2 + 40);
+        SyncSideToPosition();                                     // crosses to the right
+        bool flipAfterCross = !_mirror && _flipExtra;             // right + on -> NOT mirrored
+        Console.WriteLine("  flip drag: L+on=" + flipBeforeCross + " -> R+on=" + flipAfterCross +
+                          " (manual kept=" + _flipExtra + ") -> " +
+                          ((flipBeforeCross && flipAfterCross) ? "OK" : "FAIL"));
+        ok = ok && flipBeforeCross && flipAfterCross;
+
+        // "free" has no automatic facing, so the overlay alone decides.
+        // Reset the manual switch FIRST: the drag case above left it on, and with the XOR
+        // model that would make the "off" half of this check meaningless.
+        SetFlipExtraForTest(false);
+        SetCorner("free", false);
+        bool freeFlipOff = !_mirror;
+        SetFlipExtraForTest(true);
+        bool freeFlipOn = _mirror && !CornerFacing && _flipExtra;
+        Console.WriteLine("  flip free: off->notMirrored=" + freeFlipOff + " on->mirrored=" + freeFlipOn +
+                          " -> " + ((freeFlipOff && freeFlipOn) ? "OK" : "FAIL"));
+        ok = ok && freeFlipOff && freeFlipOn;
+        SetFlipExtraForTest(false);
 
         Console.WriteLine("  verdict: " + (ok
             ? "OK - left/right dock with the tick, free stays put and never reaches state.ini"
